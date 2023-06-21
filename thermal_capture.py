@@ -13,6 +13,11 @@ vid.set(cv2.CAP_PROP_CONVERT_RGB, 0)
 # Create a named window
 cv2.namedWindow("Thermal Frame", cv2.WINDOW_NORMAL)
 cv2.resizeWindow("Thermal Frame", 800, 600)
+cv2.moveWindow("Thermal Frame", 80, 10)
+
+cv2.namedWindow("RGB Frame", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("RGB Frame", 800, 600)
+cv2.moveWindow("RGB Frame", 890, 10)
 
 
 while vid.isOpened():
@@ -28,11 +33,25 @@ while vid.isOpened():
     rgb_picture = cv2.cvtColor(yuv_picture, cv2.COLOR_YUV2RGB_YUY2)
     thermal_picture_16 = np.frombuffer(thermal_data, dtype=np.uint16).reshape((P2Pro_resolution[1] // 2, P2Pro_resolution[0]))
     thermal_picture_8 = cv2.normalize(thermal_picture_16, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    colored_image = cv2.applyColorMap(thermal_picture_8, cv2.COLORMAP_INFERNO)
+
+    # blur
+    blur = cv2.GaussianBlur(thermal_picture_8, (0, 0), sigmaX=5, sigmaY=5)
+
+    # divide
+    divide = cv2.divide(thermal_picture_8, blur, scale=255)
 
 
+    thresh = cv2.threshold(divide, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
-    cv2.imshow("Thermal Frame", colored_image)
+    # apply morphology
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+# show
+
+
+    cv2.imshow("Thermal Frame", morph)
+    cv2.imshow("RGB Frame", rgb_picture)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break

@@ -6,7 +6,7 @@ import numpy as np
 P2Pro_resolution = (256, 384)
 P2Pro_fps = 25.0
 
-vid = cv2.VideoCapture(0)
+vid = cv2.VideoCapture(1)
 vid.set(cv2.CAP_PROP_CONVERT_RGB, 0)
 
 

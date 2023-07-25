@@ -78,9 +78,9 @@ while(cap.isOpened()):
     frame = cv2.resize(frame, (192, 256))
     # convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
     clean = np.zeros_like(frame)
 
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
     thresholds = threshold_multiotsu(gray, classes=3)
     region_cold, region_mid, region_hot = divide_image(gray, thresholds[0], thresholds[1])
@@ -88,10 +88,11 @@ while(cap.isOpened()):
     mask_mid = np.zeros_like(gray)
     mask_hot = np.zeros_like(gray)
     mask_cold[region_cold] = 255
+    mask_cold = cv2.morphologyEx(mask_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     mask_mid[region_mid] = 255
-
     mask_hot[region_hot] = 255
     mask_hot = cv2.morphologyEx(mask_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
+
     contours, _ = cv2.findContours(mask_hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in contours:
         # fit and rotate rectangle

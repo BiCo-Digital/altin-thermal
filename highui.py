@@ -9,11 +9,14 @@ import platform
 from skimage.filters import threshold_multiotsu
 from collections import deque
 
+
 def is_mac():
     return platform.system() == "Darwin"
 
+
 def use_video_file():
     return is_mac()
+
 
 WIDTH = 320
 HEIGHT = 480
@@ -34,385 +37,282 @@ class Mode:
 
 
 class MovingAverage:
-    def __init__(self, size):
+    """
+    Computes the moving average and median for the last 'size' data points.
+    """
+
+    def __init__(self, size: int):
         self.size = size
         self.queue = deque(maxlen=size)
         self.sum = 0
-        self.avg = 0
-        self.med = 0
 
-    def next(self, val):
+    def next(self, val: int):
         if len(self.queue) == self.queue.maxlen:
             self.sum -= self.queue[0]
+
         self.queue.append(val)
         self.sum += val
-        self.avg = self.sum / len(self.queue)
-        self.med = np.median(self.queue)
 
-    def average(self):
-        if len(self.queue) < self.size:
+    def average(self) -> int:
+        if not self.queue:
             return None
-        return int(self.avg)
+        return int(self.sum / len(self.queue))
 
-    def median(self):
-        return int(self.med)
+    def median(self) -> int:
+        if not self.queue:
+            return None
+        return int(np.median(list(self.queue)))
+
 
 class Box:
-    uuid = None
-
-    contour = None
-    rect = None
-    center = None
-    width = None
-    height = None
-    angle = None
-    area = None
-    aspect_ratio = None
-    corners = None
-
-    cold = False
-
     def __init__(self, contour, cold=False):
         self.uuid = uuid.uuid4()
-
         self.contour = contour
         self.rect = cv2.minAreaRect(contour)
         self.center = self.rect[0]
-        self.width = max(self.rect[1][0], self.rect[1][1])
-        self.height = min(self.rect[1][0], self.rect[1][1])
+        self.width = max(self.rect[1])
+        self.height = min(self.rect[1])
         self.angle = self.rect[2]
         self.area = self.width * self.height
         self.aspect_ratio = self.width / self.height
-        self.corners = cv2.boxPoints(self.rect)
-        self.corners = np.int0(self.corners)
-
+        self.corners = np.int0(cv2.boxPoints(self.rect))
         self.cold = cold
 
-    # static method that creates a box in middle of frame with height of 10 pixels and width of full frame
     @staticmethod
-    def create_middle_box(t = 0.1):
-        width = 192
-        height = 256
-        tall = int(256 * t)
-        points = np.array([[0, int(height / 2) + int(tall / 2)], [0, int(height / 2) - int(tall / 2)], [width, int(height / 2) - int(tall / 2)], [width, int(height / 2) + int(tall / 2)]])
-        box = Box(points)
-        return box
+    def create_centered_box(relative_height=0.1):
+        frame_width = CAM_HEIGHT // 2
+        frame_height = CAM_WIDTH
+        tall = int(frame_height * relative_height)
+        points = np.array([
+            [0, frame_height // 2 + tall // 2],
+            [0, frame_height // 2 - tall // 2],
+            [frame_width, frame_height // 2 - tall // 2],
+            [frame_width, frame_height // 2 + tall // 2]
+        ])
+        return Box(points)
 
-    def copy_from(self, other_box):
-        self.contour = other_box.contour
-        self.rect = other_box.rect
-        self.center = other_box.center
-        self.width = other_box.width
-        self.height = other_box.height
-        self.angle = other_box.angle
-        self.area = other_box.area
-        self.aspect_ratio = other_box.aspect_ratio
-        self.corners = other_box.corners
+    def clone_from(self, other_box):
+        attrs = ['contour', 'rect', 'center', 'width', 'height', 'angle', 'area', 'aspect_ratio', 'corners']
+        for attr in attrs:
+            setattr(self, attr, getattr(other_box, attr))
 
-    def is_overlaping(self, other_box):
-        overlap = cv2.rotatedRectangleIntersection(self.rect, other_box.rect)
-        if overlap[0] == 0:
-            return False
-        else:
-            return True
+    def is_overlapping(self, other_box):
+        overlap_status, _ = cv2.rotatedRectangleIntersection(self.rect, other_box.rect)
+        return overlap_status != 0
 
-    def distance_to(self, other_box):
+    def compute_distance_to(self, other_box):
         return np.linalg.norm(np.array(self.center) - np.array(other_box.center))
 
+
 class SceneManager:
-    frame_count = 0
-    cold_boxes = []
-    avg_cold_box_area = MovingAverage(100)
-    hot_boxes = []
-    avg_hot_box_area = MovingAverage(100)
-
-    checkpoint = Box.create_middle_box(0.1)
-    safe_area = Box.create_middle_box(0.9)
-
-    ordered_boxes = []
-    masked_boxes = []
-
     def __init__(self):
-        pass
-
+        self.frame_count = 0
+        self.cold_boxes = []
+        self.avg_cold_box_area = MovingAverage(100)
+        self.hot_boxes = []
+        self.avg_hot_box_area = MovingAverage(100)
+        self.checkpoint = Box.create_centered_box(0.1)
+        self.safe_area = Box.create_centered_box(0.9)
+        self.ordered_boxes = []
 
     def is_scene_ok(self):
-        is_ok = False
-
-        # there must not be 4 hot boxes in a row in reduced boxes
         count_of_hot_boxes_in_a_row = 0
         for b in self.ordered_boxes:
             if b.cold:
                 count_of_hot_boxes_in_a_row = 0
             else:
                 count_of_hot_boxes_in_a_row += 1
-            if count_of_hot_boxes_in_a_row >= 4:
-                return False
+                if count_of_hot_boxes_in_a_row >= 4:
+                    return False
+        return True
 
-        if count_of_hot_boxes_in_a_row < 4:
-            return True
+    def update_avg_box_area(self, boxes, avg_box_area):
+        for box in boxes:
+            avg_box_area.next(box.area)
 
-        return is_ok
+    def filter_boxes(self, boxes, avg_box_area):
+        lower_bound = 0.3 * avg_box_area.median()
+        upper_bound = 3 * avg_box_area.median()
+        return [box for box in boxes if lower_bound < box.area < upper_bound]
+
+    def merge_and_sort_boxes(self):
+        self.ordered_boxes = self.cold_boxes + self.hot_boxes
+        self.ordered_boxes.sort(key=lambda box: -box.center[1])
 
     def update(self, new_cold_boxes, new_hot_boxes):
         self.frame_count += 1
 
-        s_time = time.time()
+        self.update_avg_box_area(new_cold_boxes, self.avg_cold_box_area)
+        self.update_avg_box_area(new_hot_boxes, self.avg_hot_box_area)
 
-        # update average cold box width
-        for b in new_cold_boxes:
-            self.avg_cold_box_area.next(b.area)
-        # update average hot box width
-        for b in new_hot_boxes:
-            self.avg_hot_box_area.next(b.area)
+        self.cold_boxes = self.filter_boxes(new_cold_boxes, self.avg_cold_box_area)
+        self.hot_boxes = self.filter_boxes(new_hot_boxes, self.avg_hot_box_area)
 
-        # filter out boxes that are too small ( < 0.3 * avg_cold_box_area )
-        self.cold_boxes = [b for b in new_cold_boxes if 0.3 * self.avg_cold_box_area.median() < b.area < 3 * self.avg_cold_box_area.median()]
-        self.hot_boxes = [b for b in new_hot_boxes if 0.3 * self.avg_hot_box_area.median() < b.area < 3 * self.avg_hot_box_area.median()]
+        self.merge_and_sort_boxes()
 
-
-        # merge cold and hot boxes into one list and order them by y coordinate
-        self.ordered_boxes = self.cold_boxes + self.hot_boxes
-        self.ordered_boxes.sort(key=lambda box: -box.center[1])
-
-
-
-        # determine, if scene is ok
-        is_ok = self.is_scene_ok()
-
-
-        #print(self.avg_cold_box_area.median() , self.avg_hot_box_area.median(), '   ', '✅' if is_ok else '❌', '    ', ['🔵' if box.cold else '⚫️' for box in self.ordered_boxes])
-
-        # print processing time in ms
-        #print('scene classify time: ', (time.time() - s_time) * 1000, 'ms')
-        return is_ok
+        return self.is_scene_ok()
 
     def draw_scene(self):
         clean = np.zeros((256, 192, 3), np.uint8)
 
-        cv2.fillPoly(clean, [self.safe_area.corners], (10, 0, 0))
+        cv2.fillPoly(clean, [self.safe_area.corners], (80, 0, 0))
         cv2.fillPoly(clean, [self.checkpoint.corners], (0, 255, 0) if self.is_scene_ok() else (0, 0, 255))
 
         for box in self.ordered_boxes:
-            if box.cold:
-                cv2.drawContours(clean, [box.corners], 0, (255, 0, 0), 2)
-            else:
-                cv2.drawContours(clean, [box.corners], 0, (0, 0, 255), 2)
-
+            color = (255, 0, 0) if box.cold else (0, 0, 255)
+            cv2.drawContours(clean, [box.corners], 0, color, 2)
 
         return clean
+
 
 class SoupClassifier:
     def __init__(self):
         self.scene = SceneManager()
 
-    def classify(self, frame):
-        time_start = time.time()
-        # resize to 192x256
-        frame = cv2.resize(frame, (192, 256))
-        # convert to grayscale only if not already grayscale
-        gray = frame
+    def _convert_to_grayscale(self, frame):
         if len(frame.shape) == 3:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return frame
 
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        clean = np.zeros_like(frame)
-
-        thresholds = threshold_multiotsu(gray, classes=3)
+    def _create_threshold_masks(self, gray, thresholds):
         region_cold = gray <= thresholds[0]
         region_mid = (gray > thresholds[0]) & (gray <= thresholds[1])
         region_hot = gray > thresholds[1]
-        mask_cold = np.zeros_like(gray)
-        mask_mid = np.zeros_like(gray)
-        mask_hot = np.zeros_like(gray)
-        mask_cold[region_cold] = 255
-        mask_cold = cv2.morphologyEx(mask_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-        mask_mid[region_mid] = 255
-        mask_hot[region_hot] = 255
-        mask_hot = cv2.morphologyEx(mask_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
+        mask_cold = self._create_mask(region_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        mask_mid = self._create_mask(region_mid)
+        mask_hot = self._create_mask(region_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
+        return mask_cold, mask_mid, mask_hot
+
+    def _create_mask(self, region, morph_op=None, kernel=None):
+        mask = np.zeros_like(region, dtype=np.uint8)
+        mask[region] = 255
+        if morph_op:
+            mask = cv2.morphologyEx(mask, morph_op, kernel)
+        return mask
+
+    def _get_boxes_from_contours(self, contours, cold=False):
+        boxes = []
+        for cnt in contours:
+            if cold:
+                epsilon = 0.1 * cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, epsilon, True)
+                if cv2.isContourConvex(approx) and len(approx) == 4:
+                    boxes.append(Box(cnt, cold=True))
+            else:
+                boxes.append(Box(cnt))
+        return boxes
+
+    def classify(self, frame):
+        frame = cv2.resize(frame, (192, 256))
+        gray = self._convert_to_grayscale(frame)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        thresholds = threshold_multiotsu(gray, classes=3)
+        mask_cold, mask_mid, mask_hot = self._create_threshold_masks(gray, thresholds)
+
+        hot_boxes = self._get_boxes_from_contours(cv2.findContours(mask_hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0])
+        cold_boxes = self._get_boxes_from_contours(cv2.findContours(mask_cold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0], cold=True)
 
         debug_frame = np.zeros_like(gray)
-        debug_frame[region_hot] = 255
-        debug_frame[region_mid] = 128
-        debug_frame[region_cold] = 0
+        debug_frame[mask_hot > 0] = 255
+        debug_frame[mask_mid > 0] = 128
+        debug_frame[mask_cold > 0] = 0
         debug_frame = cv2.cvtColor(debug_frame, cv2.COLOR_GRAY2BGR)
 
-        # HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT
-        hot_boxes = []
-        contours, _ = cv2.findContours(mask_hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            box = Box(cnt, cold=False)
-            hot_boxes.append(box)
-            continue
-
-            # TODO: DEBUG
-            cv2.drawContours(frame, [box.corners], 0, (0, 0, 255), 2)
-            center = box.center
-            cv2.circle(frame, (int(center[0]), int(center[1])), 3, (0, 0, 255), -1)
-            [vx, vy, x, y] = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
-            lefty = int((-x * vy / vx) + y)
-            righty = int(((gray.shape[1] - x) * vy / vx) + y)
-            cv2.line(frame, (gray.shape[1] - 1, righty), (0, lefty), (0, 0, 255), 1)
-            cv2.fillPoly(clean, [box.corners], (0, 0, 255))
-            cv2.putText(frame, str(int(box.area)), (int(center[0]), int(center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-
-        # COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD
-        cold_boxes = []
-        contours_cold, _ = cv2.findContours(mask_cold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours_cold:
-            epsilon = 0.1 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            # is convex
-            if cv2.isContourConvex(approx):
-                if len(approx) == 4:
-                    # get min box
-                    box = Box(cnt, cold=True)
-                    cold_boxes.append(box)
-
-        # print processing time in ms
-        # print('feature extraction time: ', (time.time() - time_start) * 1000, 'ms')
         return self.scene.update(cold_boxes, hot_boxes), debug_frame
-
 
     def is_scene_ok(self):
         return self.scene.is_scene_ok()
 
-    def get_debug_image(self, width, height):
+    def get_debug_image(self, width=None, height=None):
         if width is not None:
             return cv2.resize(self.scene.draw_scene(), (width, height))
         else:
             return self.scene.draw_scene()
 
 
-
-# create a named window using opencv and show the image in the window so it fills the window. next add 2 buttons over the image and show the window
 class App:
-
-    # initialize the app
     def __init__(self, window_title, video_source='./thermal.mp4'):
         self.window_title = window_title
         self.video_source = video_source
-
-        # open video source
-        self.initVideoFromFile(self.video_source) if use_video_file() else self.initVideoFromCamera()
-
-        # create a canvas that can fit the above video source size
-        if is_mac():
-            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(window_title, WIDTH, HEIGHT)
-            cv2.moveWindow(window_title, 0, 0)
-        else:
-            # Create named fullscreen window
-            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
-            cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            cv2.moveWindow(window_title, -1, -1)
-
-        # create mouse click callback
-        cv2.setMouseCallback(window_title, self.onMouseClick)
+        self.init_video_source()
+        self.init_window()
         self.show_settings = is_mac()
         self.display_mode = Mode.SETTINGS if is_mac() else Mode.LIVE
-        self.trigger_delay = 0.5 # seconds
-        self.trigger_duration = 1 # seconds
-
-        # create a classifier
+        self.trigger_delay = 0.5
+        self.trigger_duration = 1
         self.soup_classifier = SoupClassifier()
-
-        # create a relay
-        if not is_mac():
-            # set realy as output device active low
-            self.relay = OutputDevice(RELAY_GPIO, active_high=False)
-            self.relay.off()
         self.isAlreadyFiring = False
-
+        self.firingMessage = 'CEKAM...'
         self.runLoop()
 
-    def initVideoFromFile(self, video_source):
-        self.vid = cv2.VideoCapture(video_source)
+    def init_video_source(self):
+        if use_video_file():
+            self.vid = cv2.VideoCapture(self.video_source)
+        else:
+            self.vid = cv2.VideoCapture(0)
+            self.vid.set(cv2.CAP_PROP_CONVERT_RGB, 0)
 
-    def grabFrameFromFile(self):
-        # if last frame from file, rewind
-        if self.vid.get(cv2.CAP_PROP_POS_FRAMES) == self.vid.get(cv2.CAP_PROP_FRAME_COUNT):
-            self.vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    def init_window(self):
+        cv2.namedWindow(self.window_title, cv2.WINDOW_NORMAL)
+        if is_mac():
+            cv2.resizeWindow(self.window_title, WIDTH, HEIGHT)
+            cv2.moveWindow(self.window_title, 0, 0)
+        else:
+            cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            cv2.moveWindow(self.window_title, -1, -1)
+        cv2.setMouseCallback(self.window_title, self.onMouseClick)
 
-        # read frame
+    def grab_frame(self):
         ret, frame = self.vid.read()
 
-        # resize
-        frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
+        if use_video_file():
+            if self.vid.get(cv2.CAP_PROP_POS_FRAMES) == self.vid.get(cv2.CAP_PROP_FRAME_COUNT):
+                self.vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
+            return ret, frame
+        else:
+            frame_mid_pos = int(len(frame) / 2)
+            picture_data = frame[0:frame_mid_pos]
+            thermal_data = frame[frame_mid_pos:]
+            yuv_picture = np.frombuffer(picture_data, dtype=np.uint8).reshape((CAM_HEIGHT // 2, CAM_WIDTH, 2))
+            rgb_picture = cv2.cvtColor(yuv_picture, cv2.COLOR_YUV2RGB_YUY2)
+            thermal_picture_16 = np.frombuffer(thermal_data, dtype=np.uint16).reshape((CAM_HEIGHT // 2, CAM_WIDTH))
+            thermal_picture_8 = cv2.normalize(thermal_picture_16, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            rgb_picture = cv2.rotate(rgb_picture, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            thermal_picture_8 = cv2.rotate(thermal_picture_8, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        return ret, frame
-
-
-    def initVideoFromCamera(self, camera_source=0):
-        self.vid = cv2.VideoCapture(camera_source)
-        self.vid.set(cv2.CAP_PROP_CONVERT_RGB, 0)
-
-    def grabFrame(self):
-        # read frame
-        ret, frame = self.vid.read()
-
-        # split video frame (top is pseudo color, bottom is temperature data)
-        frame_mid_pos = int(len(frame) / 2)
-        picture_data = frame[0:frame_mid_pos]
-        thermal_data = frame[frame_mid_pos:]
-
-        # convert buffers to numpy arrays
-        yuv_picture = np.frombuffer(picture_data, dtype=np.uint8).reshape((CAM_HEIGHT // 2, CAM_WIDTH, 2))
-        rgb_picture = cv2.cvtColor(yuv_picture, cv2.COLOR_YUV2RGB_YUY2)
-        thermal_picture_16 = np.frombuffer(thermal_data, dtype=np.uint16).reshape((CAM_HEIGHT // 2, CAM_WIDTH))
-        thermal_picture_8 = cv2.normalize(thermal_picture_16, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-        # rotate 90 degrees
-        rgb_picture = cv2.rotate(rgb_picture, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        thermal_picture_8 = cv2.rotate(thermal_picture_8, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-        return ret, thermal_picture_8
-
+            return ret, thermal_picture_8
 
     def runLoop(self):
-        # cap framerate to 25
         frame_rate = 25
         prev_t = 0
 
         while True:
-            # Make sure we don't go over the framerate cap
             time_elapsed = time.time() - prev_t
-            if time_elapsed < 1./frame_rate:
+            if time_elapsed < 1. / frame_rate:
                 continue
             prev_t = time.time()
 
-            # if settings are shown, show them and continue
             if self.display_mode == Mode.SETTINGS:
                 self.showSettings()
                 continue
 
-
-            # get a frame from the video source
-            ret, frame = self.grabFrameFromFile() if use_video_file() else self.grabFrame()
+            ret, frame = self.grab_frame()
             if ret:
                 is_ok, treshold_frame = self.soup_classifier.classify(frame)
                 if not is_ok:
                     self.fireRelay()
 
-                scaled_frame = cv2.resize(treshold_frame, (WIDTH, HEIGHT))
-                # ensure frame is in RGB format
+                scaled_frame = cv2.resize(frame, (WIDTH, HEIGHT))
                 if len(scaled_frame.shape) == 2:
                     scaled_frame = cv2.cvtColor(scaled_frame, cv2.COLOR_GRAY2RGB)
-
                 dbg = self.soup_classifier.get_debug_image(WIDTH, HEIGHT)
-
                 overlay = cv2.addWeighted(scaled_frame, 0.5, dbg, 0.3, 0)
-
-                # show procceesing time on frame, in ms (rounded)
                 cv2.putText(overlay, str(round((time.time() - prev_t) * 1000)) + ' ms', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-                # draw guidelines
                 overlay = self.drawGuidelines(overlay)
-                # write FIRE on bottom of frame if relay is on
                 if self.isAlreadyFiring:
-                    cv2.putText(overlay, 'FOUKAM', (10, HEIGHT - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-
-                # show the frame based on display mode
+                    cv2.putText(overlay, self.firingMessage, (10, HEIGHT - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
                 if self.display_mode == Mode.LIVE:
                     cv2.imshow(self.window_title, frame)
                 elif self.display_mode == Mode.TRESHOLD:
@@ -422,50 +322,51 @@ class App:
                 elif self.display_mode == Mode.DEBUG:
                     cv2.imshow(self.window_title, dbg)
 
-
-
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
-
 
     def fireRelay(self):
         if self.isAlreadyFiring:
             return
-
-        # fire relay for trigger_duration seconds but wait trigger_delay seconds before firing using threading library
         def fire_on_thread():
+            self.firingMessage = 'CEKAM...'
             time.sleep(self.trigger_delay)
+            self.firingMessage = 'FOUKAM'
             self.relay.on()
             time.sleep(self.trigger_duration)
             self.relay.off()
             self.isAlreadyFiring = False
 
         def fire_debug():
-            print("GOING TO FIRE IN " + str(self.trigger_delay) + " SECONDS")
+            self.firingMessage = 'CEKAM...'
             time.sleep(self.trigger_delay)
-            print("FIRING FOR " + str(self.trigger_duration) + " SECONDS")
+            self.firingMessage = 'FOUKAM'
             time.sleep(self.trigger_duration)
-            print("STOPPING FIRE")
             self.isAlreadyFiring = False
-
-
 
         t = threading.Thread(target=fire_on_thread if not is_mac() else fire_debug)
         t.start()
         self.isAlreadyFiring = True
 
-
-
-
-
-    def drawGuidelines(self, frame):
+    def drawGuidelines2(self, frame):
         cv2.line(frame, (115, 10), (100, 396), (0, 255, 0), 2)
         cv2.line(frame, (235, 10), (250, 396), (0, 255, 0), 2)
         cv2.line(frame, (0, 395), (WIDTH, 395), (0, 255, 0), 2)
         return frame
 
+    def drawGuidelines(self, frame):
+        # Constants
+        x_center = WIDTH // 2
+        d_top = 120 // 2
+        d_bottom = 150 // 2
 
+        # Draw lines sloped using distance from top and bottom
+        cv2.line(frame, (x_center - d_top, 0), (x_center - d_bottom, 396), (0, 128, 0), 2)
+        cv2.line(frame, (x_center + d_top, 0), (x_center + d_bottom, 396), (0, 128, 0), 2)
+
+        cv2.line(frame, (0, 395), (WIDTH, 395), (0, 128, 0), 2)
+
+        return frame
 
     def onMouseClick(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -479,84 +380,50 @@ class App:
             elif self.display_mode == Mode.DEBUG:
                 self.display_mode = Mode.SETTINGS
             elif self.display_mode == Mode.SETTINGS:
-                # check if click was inside a button
                 third_width = WIDTH // 3
                 third_height = HEIGHT // 3
-
-                # check if click was inside minus button
                 if self.didHitButton(0, 40, third_width, third_width, x, y):
                     self.trigger_delay -= 0.1
                     if self.trigger_delay < 0:
                         self.trigger_delay = 0
-
-                # check if click was inside plus button
                 if self.didHitButton(third_width * 2, 40, third_width, third_width, x, y):
                     self.trigger_delay += 0.1
-
-                # check if click was inside minus button
                 if self.didHitButton(0, 40 + third_width + 40, third_width, third_width, x, y):
                     self.trigger_duration -= 0.1
                     if self.trigger_duration < 0:
                         self.trigger_duration = 0
-
-                # check if click was inside plus button
                 if self.didHitButton(third_width * 2, 40 + third_width + 40, third_width, third_width, x, y):
                     self.trigger_duration += 0.1
-
-                # check if click was inside start button
                 if self.didHitButton(0, 80 + third_width * 2 + 40, WIDTH, third_width, x, y):
                     self.display_mode = Mode.LIVE
-
             else:
                 self.display_mode = Mode.LIVE
-
-
-
 
         if event == cv2.EVENT_LBUTTONUP:
             print('Mouse released at: ', x, y)
 
     def drawButton(self, frame, x, y, width, height, text):
-        #draw button with border of 5 pixels and text in the middle
         cv2.rectangle(frame, (x, y), (x + width, y + height), (0, 255, 0), 5)
         cv2.putText(frame, text, (x + width // 2 - 10, y + height // 2 + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
     def didHitButton(self, x, y, width, height, mouse_x, mouse_y):
-        if mouse_x >= x and mouse_x <= x + width and mouse_y >= y and mouse_y <= y + height:
-            return True
-        return False
+        return x <= mouse_x <= x + width and y <= mouse_y <= y + height
 
     def showSettings(self):
         frame = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
-
-        # draw two rows consisting of 2 buttons each and a text label between them, the buttons are used to set the delay and duration of the trigger using + and - buttons
-        # the text label shows the current delay and duration
-
-        # draw first row (minus button, delay label, plus button)
         third_width = WIDTH // 3
-
-        # draw minus button (left) as a rectangle with a minus sign in it third_width wide and 100 high
         cv2.putText(frame, 'ZPOZDENI', (0, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         self.drawButton(frame, 0, 40, third_width, third_width, '-')
         self.drawButton(frame, third_width, 40, third_width, third_width, str(round(self.trigger_delay, 1)))
         self.drawButton(frame, third_width * 2, 40, third_width, third_width, '+')
-
-        # draw second row (minus button, duration label, plus button)
         cv2.putText(frame, 'TRVANI', (0, 40 + third_width + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         self.drawButton(frame, 0, 40 + third_width + 40, third_width, third_width, '-')
         self.drawButton(frame, third_width, 40 + third_width + 40, third_width, third_width, str(round(self.trigger_duration, 1)))
         self.drawButton(frame, third_width * 2, 40 + third_width + 40, third_width, third_width, '+')
-
-        # draw start button
         self.drawButton(frame, 0, 80 + third_width * 2 + 40, WIDTH, third_width, 'START')
-
-
-
-
-
-        # show the frame
         cv2.imshow(self.window_title, frame)
         cv2.waitKey(20)
+
 
 
 app = App("Thermal Camera")

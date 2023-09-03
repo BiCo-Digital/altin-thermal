@@ -12,10 +12,25 @@ from collections import deque
 def is_mac():
     return platform.system() == "Darwin"
 
+def use_video_file():
+    return is_mac()
+
 WIDTH = 320
 HEIGHT = 480
 RELAY_GPIO = 26
 
+P2Pro_resolution = (256, 384)
+CAM_WIDTH = 256
+CAM_HEIGHT = 384
+
+
+# create enum for LIVE, TRESHOLD, OVERLAY, DEBUG, SETTINGS
+class Mode:
+    LIVE = 0
+    TRESHOLD = 1
+    OVERLAY = 2
+    DEBUG = 3
+    SETTINGS = 4
 
 
 class MovingAverage:
@@ -195,8 +210,11 @@ class SoupClassifier:
         time_start = time.time()
         # resize to 192x256
         frame = cv2.resize(frame, (192, 256))
-        # convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # convert to grayscale only if not already grayscale
+        gray = frame
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         clean = np.zeros_like(frame)
 
@@ -213,6 +231,11 @@ class SoupClassifier:
         mask_hot[region_hot] = 255
         mask_hot = cv2.morphologyEx(mask_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
 
+        debug_frame = np.zeros_like(gray)
+        debug_frame[region_hot] = 255
+        debug_frame[region_mid] = 128
+        debug_frame[region_cold] = 0
+        debug_frame = cv2.cvtColor(debug_frame, cv2.COLOR_GRAY2BGR)
 
         # HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT
         hot_boxes = []
@@ -220,6 +243,7 @@ class SoupClassifier:
         for cnt in contours:
             box = Box(cnt, cold=False)
             hot_boxes.append(box)
+            continue
 
             # TODO: DEBUG
             cv2.drawContours(frame, [box.corners], 0, (0, 0, 255), 2)
@@ -247,7 +271,7 @@ class SoupClassifier:
 
         # print processing time in ms
         # print('feature extraction time: ', (time.time() - time_start) * 1000, 'ms')
-        return self.scene.update(cold_boxes, hot_boxes)
+        return self.scene.update(cold_boxes, hot_boxes), debug_frame
 
 
     def is_scene_ok(self):
@@ -270,16 +294,23 @@ class App:
         self.video_source = video_source
 
         # open video source
-        self.initVideoFromFile(self.video_source)
+        self.initVideoFromFile(self.video_source) if use_video_file() else self.initVideoFromCamera()
 
         # create a canvas that can fit the above video source size
-        self.canvas = cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(window_title, WIDTH, HEIGHT)
-        cv2.moveWindow(window_title, 0, 0)
+        if is_mac():
+            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_title, WIDTH, HEIGHT)
+            cv2.moveWindow(window_title, 0, 0)
+        else:
+            # Create named fullscreen window
+            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            cv2.moveWindow(window_title, -1, -1)
 
         # create mouse click callback
         cv2.setMouseCallback(window_title, self.onMouseClick)
-        self.show_settings = True
+        self.show_settings = is_mac()
+        self.display_mode = Mode.SETTINGS if is_mac() else Mode.LIVE
         self.trigger_delay = 0.5 # seconds
         self.trigger_duration = 1 # seconds
 
@@ -288,7 +319,8 @@ class App:
 
         # create a relay
         if not is_mac():
-            self.relay = OutputDevice(RELAY_GPIO)
+            # set realy as output device active low
+            self.relay = OutputDevice(RELAY_GPIO, active_high=False)
             self.relay.off()
         self.isAlreadyFiring = False
 
@@ -306,7 +338,7 @@ class App:
         ret, frame = self.vid.read()
 
         # resize
-        frame = cv2.resize(frame, (WIDTH, HEIGHT))
+        frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
 
         return ret, frame
 
@@ -318,7 +350,23 @@ class App:
     def grabFrame(self):
         # read frame
         ret, frame = self.vid.read()
-        return ret, frame
+
+        # split video frame (top is pseudo color, bottom is temperature data)
+        frame_mid_pos = int(len(frame) / 2)
+        picture_data = frame[0:frame_mid_pos]
+        thermal_data = frame[frame_mid_pos:]
+
+        # convert buffers to numpy arrays
+        yuv_picture = np.frombuffer(picture_data, dtype=np.uint8).reshape((CAM_HEIGHT // 2, CAM_WIDTH, 2))
+        rgb_picture = cv2.cvtColor(yuv_picture, cv2.COLOR_YUV2RGB_YUY2)
+        thermal_picture_16 = np.frombuffer(thermal_data, dtype=np.uint16).reshape((CAM_HEIGHT // 2, CAM_WIDTH))
+        thermal_picture_8 = cv2.normalize(thermal_picture_16, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+        # rotate 90 degrees
+        rgb_picture = cv2.rotate(rgb_picture, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        thermal_picture_8 = cv2.rotate(thermal_picture_8, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        return ret, thermal_picture_8
 
 
     def runLoop(self):
@@ -334,22 +382,26 @@ class App:
             prev_t = time.time()
 
             # if settings are shown, show them and continue
-            if self.show_settings:
+            if self.display_mode == Mode.SETTINGS:
                 self.showSettings()
                 continue
 
 
             # get a frame from the video source
-            ret, frame = self.grabFrameFromFile()
+            ret, frame = self.grabFrameFromFile() if use_video_file() else self.grabFrame()
             if ret:
-                is_ok = self.soup_classifier.classify(frame)
-
+                is_ok, treshold_frame = self.soup_classifier.classify(frame)
                 if not is_ok:
                     self.fireRelay()
 
-                dbg = self.soup_classifier.get_debug_image(WIDTH, HEIGHT)
-                overlay = cv2.addWeighted(frame, 0.5, dbg, 0.5, 0)
+                scaled_frame = cv2.resize(treshold_frame, (WIDTH, HEIGHT))
+                # ensure frame is in RGB format
+                if len(scaled_frame.shape) == 2:
+                    scaled_frame = cv2.cvtColor(scaled_frame, cv2.COLOR_GRAY2RGB)
 
+                dbg = self.soup_classifier.get_debug_image(WIDTH, HEIGHT)
+
+                overlay = cv2.addWeighted(scaled_frame, 0.5, dbg, 0.3, 0)
 
                 # show procceesing time on frame, in ms (rounded)
                 cv2.putText(overlay, str(round((time.time() - prev_t) * 1000)) + ' ms', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -359,8 +411,17 @@ class App:
                 # write FIRE on bottom of frame if relay is on
                 if self.isAlreadyFiring:
                     cv2.putText(overlay, 'FOUKAM', (10, HEIGHT - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-                # show the frame
-                cv2.imshow(self.window_title, overlay)
+
+                # show the frame based on display mode
+                if self.display_mode == Mode.LIVE:
+                    cv2.imshow(self.window_title, frame)
+                elif self.display_mode == Mode.TRESHOLD:
+                    cv2.imshow(self.window_title, treshold_frame)
+                elif self.display_mode == Mode.OVERLAY:
+                    cv2.imshow(self.window_title, overlay)
+                elif self.display_mode == Mode.DEBUG:
+                    cv2.imshow(self.window_title, dbg)
+
 
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -409,7 +470,15 @@ class App:
     def onMouseClick(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             print('Mouse clicked at: ', x, y)
-            if self.show_settings:
+            if self.display_mode == Mode.LIVE:
+                self.display_mode = Mode.TRESHOLD
+            elif self.display_mode == Mode.TRESHOLD:
+                self.display_mode = Mode.OVERLAY
+            elif self.display_mode == Mode.OVERLAY:
+                self.display_mode = Mode.DEBUG
+            elif self.display_mode == Mode.DEBUG:
+                self.display_mode = Mode.SETTINGS
+            elif self.display_mode == Mode.SETTINGS:
                 # check if click was inside a button
                 third_width = WIDTH // 3
                 third_height = HEIGHT // 3
@@ -436,11 +505,10 @@ class App:
 
                 # check if click was inside start button
                 if self.didHitButton(0, 80 + third_width * 2 + 40, WIDTH, third_width, x, y):
-                    print('START')
-                    self.show_settings = False
+                    self.display_mode = Mode.LIVE
 
             else:
-                self.show_settings = True
+                self.display_mode = Mode.LIVE
 
 
 

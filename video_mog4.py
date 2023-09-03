@@ -9,16 +9,6 @@ from skimage.filters import threshold_multiotsu
 from skimage.morphology import skeletonize
 import matplotlib.pyplot as plt
 
-# Load video capture from file
-cap = cv2.VideoCapture('thermal.mp4')
-
-# fgbg = cv2.bgsegm.createBackgroundSubtractorMOG()
-fgbg = cv2.bgsegm.createBackgroundSubtractorLSBP()
-fgbg = cv2.bgsegm.createBackgroundSubtractorGSOC()
-fgbg = cv2.bgsegm.createBackgroundSubtractorGMG(20, 0.7)
-fgbg = cv2.bgsegm.createBackgroundSubtractorCNT(2, True)
-fgbg = cv2.createBackgroundSubtractorMOG2()
-
 
 def display(window_name, image, grid_pos=(0, 0)):
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -153,6 +143,7 @@ class SceneManager:
     def update(self, new_cold_boxes, new_hot_boxes):
         self.frame_count += 1
 
+        s_time = time.time()
 
         # update average cold box width
         for b in new_cold_boxes:
@@ -176,13 +167,17 @@ class SceneManager:
         is_ok = self.is_scene_ok()
 
 
-        print(self.avg_cold_box_area.median() , self.avg_hot_box_area.median(), '   ', '✅' if is_ok else '❌', '    ', ['🔵' if box.cold else '⚫️' for box in self.ordered_boxes])
+        #print(self.avg_cold_box_area.median() , self.avg_hot_box_area.median(), '   ', '✅' if is_ok else '❌', '    ', ['🔵' if box.cold else '⚫️' for box in self.ordered_boxes])
+
+        # print processing time in ms
+        #print('scene classify time: ', (time.time() - s_time) * 1000, 'ms')
+        return is_ok
 
     def draw_scene(self):
         clean = np.zeros((256, 192, 3), np.uint8)
 
-        cv2.fillPoly(clean, [self.safe_area.corners], (128, 0, 0))
-        cv2.fillPoly(clean, [self.checkpoint.corners], (0, 255, 0))
+        cv2.fillPoly(clean, [self.safe_area.corners], (10, 0, 0))
+        cv2.fillPoly(clean, [self.checkpoint.corners], (0, 255, 0) if self.is_scene_ok() else (0, 0, 255))
 
         for box in self.ordered_boxes:
             if box.cold:
@@ -190,7 +185,8 @@ class SceneManager:
             else:
                 cv2.drawContours(clean, [box.corners], 0, (0, 0, 255), 2)
 
-        display('Scene manager', clean, (3, 0))
+
+        return clean
 
 
 def otsu_variance(image, t1, t2):
@@ -240,81 +236,73 @@ def show_divided_image(image, region1, region2, region3):
 
 scene = SceneManager()
 
+class SoupClassifier:
+    def __init__(self):
+        self.scene = SceneManager()
 
-while (cap.isOpened()):
-    ret, frame = cap.read()
-    display('RGB Frame', frame, (0, 0))
+    def classify(self, frame):
+        time_start = time.time()
+        # resize to 192x256
+        frame = cv2.resize(frame, (192, 256))
+        # convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        clean = np.zeros_like(frame)
 
-    # resize to 192x256
-    frame = cv2.resize(frame, (192, 256))
-    # convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    clean = np.zeros_like(frame)
+        thresholds = threshold_multiotsu(gray, classes=3)
+        region_cold, region_mid, region_hot = divide_image(gray, thresholds[0], thresholds[1])
+        mask_cold = np.zeros_like(gray)
+        mask_mid = np.zeros_like(gray)
+        mask_hot = np.zeros_like(gray)
+        mask_cold[region_cold] = 255
+        mask_cold = cv2.morphologyEx(mask_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        mask_mid[region_mid] = 255
+        mask_hot[region_hot] = 255
+        mask_hot = cv2.morphologyEx(mask_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
 
-    thresholds = threshold_multiotsu(gray, classes=3)
-    region_cold, region_mid, region_hot = divide_image(gray, thresholds[0], thresholds[1])
-    mask_cold = np.zeros_like(gray)
-    mask_mid = np.zeros_like(gray)
-    mask_hot = np.zeros_like(gray)
-    mask_cold[region_cold] = 255
-    mask_cold = cv2.morphologyEx(mask_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    mask_mid[region_mid] = 255
-    mask_hot[region_hot] = 255
-    mask_hot = cv2.morphologyEx(mask_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
 
-    # TODO: DEBUG
-    display('mask_cold', mask_cold, (0, 1))
-    #display('mask_mid', mask_mid, (1, 1))
-    display('mask_hot', mask_hot, (1, 1))
+        # HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT
+        hot_boxes = []
+        contours, _ = cv2.findContours(mask_hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            box = Box(cnt, cold=False)
+            hot_boxes.append(box)
 
-    # HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT HOT
-    hot_boxes = []
-    contours, _ = cv2.findContours(mask_hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for cnt in contours:
-        box = Box(cnt, cold=False)
-        hot_boxes.append(box)
+            # TODO: DEBUG
+            cv2.drawContours(frame, [box.corners], 0, (0, 0, 255), 2)
+            center = box.center
+            cv2.circle(frame, (int(center[0]), int(center[1])), 3, (0, 0, 255), -1)
+            [vx, vy, x, y] = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
+            lefty = int((-x * vy / vx) + y)
+            righty = int(((gray.shape[1] - x) * vy / vx) + y)
+            cv2.line(frame, (gray.shape[1] - 1, righty), (0, lefty), (0, 0, 255), 1)
+            cv2.fillPoly(clean, [box.corners], (0, 0, 255))
+            cv2.putText(frame, str(int(box.area)), (int(center[0]), int(center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
-        # TODO: DEBUG
-        cv2.drawContours(frame, [box.corners], 0, (0, 0, 255), 2)
-        center = box.center
-        cv2.circle(frame, (int(center[0]), int(center[1])), 3, (0, 0, 255), -1)
-        [vx, vy, x, y] = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
-        lefty = int((-x * vy / vx) + y)
-        righty = int(((gray.shape[1] - x) * vy / vx) + y)
-        cv2.line(frame, (gray.shape[1] - 1, righty), (0, lefty), (0, 0, 255), 1)
-        cv2.fillPoly(clean, [box.corners], (0, 0, 255))
-        cv2.putText(frame, str(int(box.area)), (int(center[0]), int(center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        # COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD
+        cold_boxes = []
+        contours_cold, _ = cv2.findContours(mask_cold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours_cold:
+            epsilon = 0.1 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            # is convex
+            if cv2.isContourConvex(approx):
+                if len(approx) == 4:
+                    # get min box
+                    box = Box(cnt, cold=True)
+                    cold_boxes.append(box)
 
-    # COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD COLD
-    cold_boxes = []
-    contours_cold, _ = cv2.findContours(mask_cold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for cnt in contours_cold:
-        epsilon = 0.1 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        # is convex
-        if cv2.isContourConvex(approx):
-            if len(approx) == 4:
-                # get min box
-                box = Box(cnt, cold=True)
-                cold_boxes.append(box)
+        # print processing time in ms
+        # print('feature extraction time: ', (time.time() - time_start) * 1000, 'ms')
+        return self.scene.update(cold_boxes, hot_boxes)
 
-    # TODO: DEBUG
-    cv2.drawContours(frame, [box.corners for box in cold_boxes], -1, (255, 0, 0), 2)
-    cv2.fillPoly(clean, [box.corners for box in cold_boxes], (255, 0, 0))
-    display('Squares', frame, (2, 0))
 
-    scene.update(cold_boxes, hot_boxes)
-    scene.draw_scene()
+    def is_scene_ok(self):
+        return self.scene.is_scene_ok()
 
-    k = cv2.waitKey(0) & 0xff
-    # if q
-    if k == ord('q'):
-        break
+    def get_debug_image(self, width, height):
+        if width is not None:
+            return cv2.resize(self.scene.draw_scene(), (width, height))
+        else:
+            return self.scene.draw_scene()
 
-    # if space
-    if k == ord('c'):
-        cv2.waitKey(5000)
-
-cap.release()
-cv2.destroyAllWindows()

@@ -242,6 +242,9 @@ class App:
         self.trigger_delay = 0.5
         self.trigger_duration = 1
         self.soup_classifier = SoupClassifier()
+        if not is_mac():
+            self.relay = OutputDevice(RELAY_GPIO, active_high=False)
+            self.relay.off()
         self.isAlreadyFiring = False
         self.firingMessage = 'CEKAM...'
         self.runLoop()

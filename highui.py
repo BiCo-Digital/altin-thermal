@@ -232,7 +232,7 @@ class SoupClassifier:
 
 
 class App:
-    def __init__(self, window_title, video_source='./thermal.mp4'):
+    def __init__(self, window_title, video_source='./output8.mp4'):
         self.window_title = window_title
         self.video_source = video_source
         self.init_video_source()
@@ -273,6 +273,9 @@ class App:
             if self.vid.get(cv2.CAP_PROP_POS_FRAMES) == self.vid.get(cv2.CAP_PROP_FRAME_COUNT):
                 self.vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
             frame = cv2.resize(frame, (CAM_WIDTH, CAM_HEIGHT))
+            # if self.video_source contains output
+            if self.video_source.startswith('./output'):
+                frame = cv2.flip(frame, 0)
             return ret, frame
         else:
             frame_mid_pos = int(len(frame) / 2)

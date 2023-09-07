@@ -10,62 +10,19 @@ from imutils.object_detection import non_max_suppression
 cv2.namedWindow("Frame", cv2.WINDOW_NORMAL)
 # show window
 cv2.imshow('Frame', np.zeros((256, 192, 3), np.uint8))
-cv2.moveWindow("Frame", 512, 0)
+cv2.moveWindow("Frame", -512, 0)
 
 # resize window
 cv2.resizeWindow("Frame", 384, 512)
 
 # Capture the frame from the video source while 1
-cap = cv2.VideoCapture('thermal.mp4')
-
-# skip to frame 100*25
-#cap.set(cv2.CAP_PROP_POS_FRAMES, 100 * 25)
-#cap.set(cv2.CAP_PROP_POS_FRAMES, 450 * 25)
-
-# bgsub = cv2.bgsegm.createBackgroundSubtractorLSBP()
-# bgsub = cv2.bgsegm.createBackgroundSubtractorGSOC()
-# bgsub = cv2.bgsegm.createBackgroundSubtractorGMG(20, 0.7)
-bgsub = cv2.bgsegm.createBackgroundSubtractorCNT(2, True)
-bgsub = cv2.createBackgroundSubtractorMOG2(100, 40)
-
-# show first frame and allow user to select ROI
-# _, f = cap.read()
-# f = cv2.flip(f, 0)
-# r = cv2.selectROI("Frame", f, False)
-
-queue = deque(maxlen=200)
+cap = cv2.VideoCapture('output10.mkv')
+# skip to 1000th frame
+#cap.set(cv2.CAP_PROP_POS_FRAMES, 100*25)
 
 
-def plot_data_on_canvas(data):
-    # Parameters for the canvas
-    canvas_width = 1280
-    canvas_height = 400
-    margin = 50
 
-    # Create a blank canvas
-    canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 255
-
-    x_coords = np.linspace(margin, canvas_width - margin, len(data)).astype(int)
-    # y_coords = (canvas_height - margin) - (np.array(data) * (canvas_height - 2 * margin)).astype(int)
-
-    min = np.min(data)
-    max = np.max(data)
-    delta = max - min
-    y_coords = (canvas_height - margin) - (((np.array(data) - min) / delta) * (canvas_height - 2 * margin)).astype(int)
-
-    for i in range(1, len(data)):
-        cv2.line(canvas, (x_coords[i - 1], y_coords[i - 1]), (x_coords[i], y_coords[i]), (0, 255, 0), 2)
-    cv2.line(canvas, (margin, margin), (margin, canvas_height - margin), (0, 0, 0), 1)
-    cv2.line(canvas, (margin, canvas_height - margin), (canvas_width - margin, canvas_height - margin), (0, 0, 0), 1)
-    return canvas
-
-
-hot = cv2.imread('hot_clean.png')
-hot = cv2.cvtColor(hot, cv2.COLOR_BGR2GRAY)
-cold = cv2.imread('cold.png')
-cold = cv2.cvtColor(cold, cv2.COLOR_BGR2GRAY)
-
-check_line_y = 140
+check_line_y = 128
 
 
 # Object Counter, counts hot, cold and their ends (hot_end, cold_end)
@@ -139,67 +96,90 @@ class ObjectCounter:
 
         if len(self.queue) >= 3:
             if self.queue[-1] == 1 and self.queue[-2] == 1 and self.queue[-3] == 1:
-                print('‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️')
+                self.fire_alarm()
 
 
 
         self.print()
 
+    def fire_alarm(self):
+        print('‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️')
+
     def print(self):
         # print queue as emojis
         print(''.join(['🔴' if x == 1 else '🔵' for x in self.queue]))
 
+
+
+def find_query_in_frame(query, frame, sensitivity, overlapTresh):
+    result = cv2.matchTemplate(frame, query, cv2.TM_CCOEFF_NORMED)
+    w, h = query.shape[::-1]
+    (ys, xs) = np.where(result > sensitivity)
+    rects = np.array([[x, y, x + w, y + h] for (x, y) in zip(xs, ys)])
+    #rects = non_max_suppression(rects, probs=None, overlapThresh=overlapTresh)
+    mask = np.zeros(frame.shape, np.uint8)
+    for (x, y, x2, h2) in rects:
+        cv2.rectangle(mask, (x, y), (x2, h2), (255, 255, 255), -1)
+
+    mask = cv2.erode(mask, np.ones((5, 5), np.uint8), iterations=1)
+
+
+    return mask
+
+
+
 object_counter = ObjectCounter()
+hot = cv2.imread('hot.png', cv2.IMREAD_GRAYSCALE)
+hot_15_deg = cv2.imread('hot_15_deg.png', cv2.IMREAD_GRAYSCALE)
+hot_350_deg = cv2.imread('hot_350_deg.png', cv2.IMREAD_GRAYSCALE)
+
+cold = cv2.imread('cold.png', cv2.IMREAD_GRAYSCALE)
+cold_small = cv2.imread('cold_small.png', cv2.IMREAD_GRAYSCALE)
+
+
 
 while (cap.isOpened()):
     ret, frame = cap.read()
     if ret == True:
 
         # flip frame
-        # frame = cv2.flip(frame, 0)
+        frame = cv2.flip(frame, 0)
+
+        #rotate frame 90 degrees
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         # crop frame
         # frame = frame[int(r[1]):int(r[1] + r[3]), int(r[0]):int(r[0] + r[2])]
 
         # resize to 192x256
-        frame = cv2.resize(frame, (192, 256), interpolation=cv2.INTER_AREA)
+        # frame = cv2.resize(frame, (192, 256), interpolation=cv2.INTER_AREA)
 
         # encode frame as grayscale
         frameGray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        result_hot = cv2.matchTemplate(frameGray, hot, cv2.TM_CCOEFF_NORMED)
-        # get the best match position and treshold value
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result_hot)
 
-        best_treshold = min_val
+        hot_mask = find_query_in_frame(hot, frameGray, 0.7, 0.8)
+        hot_15_deg_mask = find_query_in_frame(hot_15_deg, frameGray, 0.7, 0.8)
+        hot_350_deg_mask = find_query_in_frame(hot_350_deg, frameGray, 0.7, 0.8)
+        hot_mask = cv2.bitwise_or(hot_mask, hot_15_deg_mask)
+        hot_mask = cv2.bitwise_or(hot_mask, hot_350_deg_mask)
 
-        result_cold = cv2.matchTemplate(frameGray, cold, cv2.TM_CCOEFF_NORMED)
 
-        debug = cv2.cvtColor(frameGray, cv2.COLOR_GRAY2BGR)
-
-        hot_w, hot_h = hot.shape[::-1]
-        (hot_ys, hot_xs) = np.where(result_hot > 0.6)
-        hot_rects = np.array([[x, y, x + hot_w, y + hot_h] for (x, y) in zip(hot_xs, hot_ys)])
-        hot_rects = non_max_suppression(hot_rects, probs=None, overlapThresh=0.8)
-        hot_mask = np.zeros(frameGray.shape, np.uint8)
-        for (x, y, x2, h2) in hot_rects:
-            cv2.rectangle(hot_mask, (x, y), (x2, h2), (255, 255, 255), -1)
-
-        cold_w, cold_h = cold.shape[::-1]
-        (cold_ys, cold_xs) = np.where(result_cold >= 0.7)
-        cold_rects = np.array([[x, y, x + cold_w, y + cold_h] for (x, y) in zip(cold_xs, cold_ys)])
-        cold_rects = non_max_suppression(cold_rects, probs=None, overlapThresh=0.8)
-        cold_mask = np.zeros(frameGray.shape, np.uint8)
-        for (x, y, x2, h2) in cold_rects:
-            cv2.rectangle(cold_mask, (x, y), (x2, h2), (255, 255, 255), -1)
+        cold_mask = find_query_in_frame(cold, frameGray, 0.7, 0.3)
+        cold_small_mask = find_query_in_frame(cold_small, frameGray, 0.7, 0.3)
+        cold_mask = cv2.bitwise_or(cold_mask, cold_small_mask)
 
         # TODO: DEBUG
+        debug = frame.copy()
         if True:
-            for (x, y, x2, h2) in hot_rects:
-                cv2.rectangle(debug, (x, y), (x2, h2), (0, 0, 255), 2)
+            #border only hot mask contours
+            hot_canny = cv2.Canny(hot_mask, 100, 200)
+            hot_contours, _ = cv2.findContours(hot_canny, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(debug, hot_contours, -1, (0, 0, 255), 2)
 
-            for (x, y, x2, h2) in cold_rects:
-                cv2.rectangle(debug, (x, y), (x2, h2), (255, 0, 0), 2)
+            cold_canny = cv2.Canny(cold_mask, 100, 200)
+            cold_contours, _ = cv2.findContours(cold_canny, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(debug, cold_contours, -1, (255, 0, 0), 2)
 
             # TODO: DEBUG
             cv2.line(debug, (0, check_line_y), (debug.shape[1], check_line_y), (0, 255, 0), 1)
@@ -213,15 +193,17 @@ while (cap.isOpened()):
         # print number of frame
         print(cap.get(cv2.CAP_PROP_POS_FRAMES) // 25)
 
+        cv2.imwrite('frame.png', frame)
 
         # press space to pause
-        if cv2.waitKey(40) & 0xFF == ord(' '):
+        if cv2.waitKey(15) & 0xFF == ord(' '):
             while True:
                 if cv2.waitKey(10) & 0xFF == ord(' '):
                     break
-                if cv2.waitKey(10) & 0xFF == ord('q'):
-                    # exit program if q is pressed
-                    os._exit(0)
+
+        # press q to quit
+        if cv2.waitKey(15) & 0xFF == ord('q'):
+            break
 
     # Break the loop
     else:

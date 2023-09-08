@@ -1,5 +1,6 @@
 import time
 import uuid
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -9,6 +10,7 @@ import platform
 from skimage.filters import threshold_multiotsu
 from collections import deque
 from imutils.object_detection import non_max_suppression
+import os
 
 def is_mac():
     return platform.system() == "Darwin"
@@ -16,6 +18,9 @@ def is_mac():
 
 def use_video_file():
     return is_mac()
+
+
+DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
 WIDTH = 320
@@ -26,7 +31,11 @@ P2Pro_resolution = (256, 384)
 CAM_WIDTH = 256
 CAM_HEIGHT = 384
 
-CHECK_LINE_Y = CAM_WIDTH // 2
+CHECK_LINE_Y = CAM_WIDTH // 2 + 30
+
+GUIDE_DISTANCE = 36
+LEFT_GUIDE_X = 55
+RIGHT_GUIDE_X = 145
 
 # create enum for LIVE, TRESHOLD, OVERLAY, DEBUG, SETTINGS
 class Mode:
@@ -283,14 +292,14 @@ class ObjectCounter:
         self.is_frame_ok = True
 
         self.queue = deque(maxlen=3)
-        self.hot_image = cv2.imread('hot.png', cv2.IMREAD_GRAYSCALE)
-        self.hot_15_deg_image = cv2.imread('hot_15_deg.png', cv2.IMREAD_GRAYSCALE)
-        self.hot_350_deg_image = cv2.imread('hot_350_deg.png', cv2.IMREAD_GRAYSCALE)
+        self.hot_image = cv2.imread(DIR_PATH + '/hot.png', cv2.IMREAD_GRAYSCALE)
+        self.hot_15_deg_image = cv2.imread(DIR_PATH + '/hot_15_deg.png', cv2.IMREAD_GRAYSCALE)
+        self.hot_350_deg_image = cv2.imread(DIR_PATH + '/hot_350_deg.png', cv2.IMREAD_GRAYSCALE)
 
-        self.cold_image = cv2.imread('cold.png', cv2.IMREAD_GRAYSCALE)
-        self.cold_small_image = cv2.imread('cold_small.png', cv2.IMREAD_GRAYSCALE)
+        self.cold_image = cv2.imread(DIR_PATH + '/cold.png', cv2.IMREAD_GRAYSCALE)
+        self.cold_small_image = cv2.imread(DIR_PATH + '/cold_small.png', cv2.IMREAD_GRAYSCALE)
 
-    def _find_query_in_frame(self, query, frame, sensitivity, overlapTresh):
+    def _find_query_in_frame_back(self, query, frame, sensitivity, overlapTresh):
         result = cv2.matchTemplate(frame, query, cv2.TM_CCOEFF_NORMED)
         w, h = query.shape[::-1]
         (ys, xs) = np.where(result > sensitivity)
@@ -304,6 +313,79 @@ class ObjectCounter:
 
         return mask
 
+    def _find_query_in_frame(self, query, frame, sensitivity, footprint):
+
+        """
+                Finds the query image in the frame image using template matching.
+
+                Parameters:
+                - query: the query image (grayscale or color)
+                - frame: the frame image (grayscale or color)
+                - sensitivity: threshold for the match (higher values mean more sensitive)
+                - footprint: tuple defining the neighborhood size for finding local minima
+
+                Returns:
+                - List of tuples representing the potential matches. Each tuple contains:
+                  - x: x-coordinate of the top-left corner of the bounding box
+                  - y: y-coordinate of the top-left corner of the bounding box
+                  - w: width of the bounding box
+                  - h: height of the bounding box
+                """
+        # Ensure the images are in grayscale
+        if len(query.shape) == 3:
+            query = cv2.cvtColor(query, cv2.COLOR_BGR2GRAY)
+        if len(frame.shape) == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Get the size of the template
+        w, h = query.shape[::-1]
+
+        # Apply template matching using TM_SQDIFF_NORMED method
+        result = cv2.matchTemplate(frame, query, cv2.TM_SQDIFF_NORMED)
+
+        # Find local minima in the match result
+        local_minima = (result == cv2.erode(result, np.ones(footprint)))
+
+        # List to store possible positions
+        positions = []
+
+        # Add the possible positions to the list
+        for y in range(result.shape[0]):
+            for x in range(result.shape[1]):
+                if local_minima[y, x] and result[y, x] < 1 - sensitivity:
+                    positions.append((x, y, w, h))
+
+        mask = np.zeros(frame.shape, np.uint8)
+        for (x, y, w, h) in positions:
+            cv2.rectangle(mask, (x, y), (x + w, y + h), (255, 255, 255), -1)
+
+        mask = cv2.dilate(mask, np.ones((3, 8), np.uint8), iterations=1)
+        # convex hull
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        for c in contours:
+            hull = cv2.convexHull(c)
+            cv2.drawContours(mask, [hull], 0, (255, 255, 255), -1)
+
+
+        return mask
+
+
+
+    def _create_mask(self, region, morph_op=None, kernel=None):
+        mask = np.zeros_like(region, dtype=np.uint8)
+        mask[region] = 255
+        if morph_op:
+            mask = cv2.morphologyEx(mask, morph_op, kernel)
+        return mask
+    def _create_threshold_masks(self, gray, thresholds):
+        region_cold = gray <= thresholds[0]
+        region_mid = (gray > thresholds[0]) & (gray <= thresholds[1])
+        region_hot = gray > thresholds[1]
+        mask_cold = self._create_mask(region_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        mask_mid = self._create_mask(region_mid)
+        mask_hot = self._create_mask(region_hot, cv2.MORPH_OPEN, np.ones((3, 11), np.uint8))
+        return mask_cold, mask_mid, mask_hot
+
     def classify(self, frame):
 
         # assure that frame is 192x256 and grayscale
@@ -311,18 +393,42 @@ class ObjectCounter:
         if len(frame.shape) == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # crop frame to LEFT_GUIDE_X:RIGHT_GUIDE_X
+        frame = frame[:, LEFT_GUIDE_X:RIGHT_GUIDE_X]
 
-        hot_mask_0 = self._find_query_in_frame(self.hot_image, frame, 0.7, 0.3)
-        hot_mask_15 = self._find_query_in_frame(self.hot_15_deg_image, frame, 0.7, 0.3)
-        hot_mask_350 = self._find_query_in_frame(self.hot_350_deg_image, frame, 0.7, 0.3)
-        hot_mask = cv2.bitwise_or(hot_mask_0, hot_mask_15)
-        hot_mask = cv2.bitwise_or(hot_mask, hot_mask_350)
+        # gauss
+        frame = cv2.GaussianBlur(frame, (5, 5), 0)
 
-        cold_mask = self._find_query_in_frame(self.cold_image, frame, 0.7, 0.3)
-        cold_small_mask = self._find_query_in_frame(self.cold_small_image, frame, 0.7, 0.3)
-        cold_mask = cv2.bitwise_or(cold_mask, cold_small_mask)
+
+        hot_mask = self._find_query_in_frame(self.hot_image, frame, sensitivity=0.85, footprint=(6,6))
+        hot_mask_15 = self._find_query_in_frame(self.hot_15_deg_image, frame, sensitivity=0.85, footprint=(6,6))
+        #hot_mask_350 = self._find_query_in_frame(self.hot_350_deg_image, frame, 0.7, 0.3)
+        hot_mask = cv2.bitwise_or(hot_mask, hot_mask_15)
+        #hot_mask = cv2.bitwise_or(hot_mask, hot_mask_350)
+
+        if np.all(hot_mask == 0):
+            self.hot_mask = None
+            return
+
+
+        thresholds = threshold_multiotsu(cv2.GaussianBlur(frame, (5, 5), 0), classes=3)
+        region_cold = frame <= thresholds[0]
+        cold_mask = self._create_mask(region_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+        cold_mask = self._find_query_in_frame(self.cold_image, frame, sensitivity=0.10, footprint=(3,3))
+        #cold_mask_small = self._find_query_in_frame(self.cold_small_image, frame, sensitivity=0.75, footprint=(6,6))
+        #cold_mask = cv2.bitwise_or(cold_mask, cold_mask_small)
+
+        cv2.imshow('cold_mask', cold_mask)
+
+
 
         mid_mask = cv2.bitwise_not(cv2.bitwise_or(hot_mask, cold_mask))
+
+
+        # if hot or cold mask is empty, return
+        if np.all(hot_mask == 0) and np.all(cold_mask == 0):
+            return
 
         # check if at y=170 there is a hot or cold object determined by the mask
         hot = hot_mask[CHECK_LINE_Y, :]
@@ -390,9 +496,21 @@ class ObjectCounter:
         return self.is_frame_ok
 
     def get_debug_image(self, width=192, height=256):
+        if self.hot_mask is None or self.cold_mask is None:
+            return np.zeros((height, width, 3), np.uint8)
+
         debug = np.zeros((height, width, 3), np.uint8)
-        d_h = cv2.resize(self.hot_mask, (width, height))
-        d_c = cv2.resize(self.cold_mask, (width, height))
+
+        # add hot_mask to debug image at position LEFT_GUIDE_X
+        big_hot_mask = np.zeros((256, 192), np.uint8)
+        big_hot_mask[:, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.hot_mask
+
+        # add cold_mask to debug image at position LEFT_GUIDE_X
+        big_cold_mask = np.zeros((256, 192), np.uint8)
+        big_cold_mask[:, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.cold_mask
+
+        d_h = cv2.resize(big_hot_mask, (width, height))
+        d_c = cv2.resize(big_cold_mask, (width, height))
 
         # get contours from masks
         contours_hot, _ = cv2.findContours(d_h, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -409,13 +527,13 @@ class ObjectCounter:
 
 
 class App:
-    def __init__(self, window_title, video_source='./thermal.mp4'):
+    def __init__(self, window_title, video_source='./output8.mp4'):
         self.window_title = window_title
         self.video_source = video_source
         self.init_video_source()
         self.init_window()
-        self.show_settings = is_mac()
-        self.display_mode = Mode.SETTINGS if is_mac() else Mode.LIVE
+        self.show_settings = False
+        self.display_mode = Mode.OVERLAY
         self.trigger_delay = 0.5
         self.trigger_duration = 1
         self.soup_classifier = ObjectCounter()
@@ -437,7 +555,8 @@ class App:
         cv2.namedWindow(self.window_title, cv2.WINDOW_NORMAL)
         if is_mac():
             cv2.resizeWindow(self.window_title, WIDTH, HEIGHT)
-            cv2.moveWindow(self.window_title, 0, 0)
+            cv2.imshow(self.window_title, np.zeros((HEIGHT, WIDTH, 3), np.uint8))
+            cv2.moveWindow(self.window_title, -500, 0)
         else:
             cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             cv2.moveWindow(self.window_title, -1, -1)
@@ -488,7 +607,7 @@ class App:
                 is_ok = self.soup_classifier.is_scene_ok()
                 treshold_frame = self.soup_classifier.get_debug_image(WIDTH, HEIGHT)
                 if not is_ok:
-                    self.fireRelay()
+                    self.fireRelay(frame)
 
                 scaled_frame = cv2.resize(frame, (WIDTH, HEIGHT))
                 if len(scaled_frame.shape) == 2:
@@ -513,9 +632,16 @@ class App:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-    def fireRelay(self):
+    def fireRelay(self, frame):
         if self.isAlreadyFiring:
             return
+
+        # save frame to file when firing with timestamp
+        str_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        cv2.imwrite(DIR_PATH + '/fire/fired_' + str_timestamp + '.jpg', frame)
+        overlay = cv2.addWeighted(frame, 1, self.soup_classifier.get_debug_image(192, 256), 1, 0)
+        cv2.imwrite(DIR_PATH + '/fire/fired_' + str_timestamp + '_debug.jpg', overlay)
+
         def fire_on_thread():
             self.firingMessage = 'CEKAM...'
             time.sleep(self.trigger_delay)
@@ -549,8 +675,13 @@ class App:
         d_bottom = 150 // 2
 
         # Draw lines sloped using distance from top and bottom
-        cv2.line(frame, (x_center - d_top, 0), (x_center - d_bottom, 396), (0, 255, 0), 2)
-        cv2.line(frame, (x_center + d_top, 0), (x_center + d_bottom, 396), (0, 255, 0), 2)
+        #cv2.line(frame, (x_center - d_top, 0), (x_center - d_bottom, 396), (0, 255, 0), 2)
+        #cv2.line(frame, (x_center + d_top, 0), (x_center + d_bottom, 396), (0, 255, 0), 2)
+
+        # Draw line LEFT_GUIDE_X and RIGHT_GUIDE_X, keep in mind that GUIDES are calclulated for width 192, not WIDTH
+        cv2.line(frame, (int(LEFT_GUIDE_X / 192 * WIDTH), 0), (int(LEFT_GUIDE_X / 192 * WIDTH), HEIGHT), (0, 255, 0), 2)
+        cv2.line(frame, (int(RIGHT_GUIDE_X / 192 * WIDTH), 0), (int(RIGHT_GUIDE_X / 192 * WIDTH), HEIGHT), (0, 255, 0), 2)
+
 
         cv2.line(frame, (0, int(HEIGHT * CHECK_LINE_Y / 256)), (WIDTH, int(HEIGHT * CHECK_LINE_Y / 256)), (0, 255, 0), 2)
 

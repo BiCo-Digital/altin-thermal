@@ -5,6 +5,7 @@ from collections import deque
 import itertools
 import cv2
 import numpy as np
+import skimage
 from imutils.object_detection import non_max_suppression
 from skimage.exposure import exposure
 from skimage.feature import local_binary_pattern, hog
@@ -22,7 +23,7 @@ cv2.moveWindow("Frame", 20, 0)
 cv2.resizeWindow("Frame", 800, 600)
 
 # Capture the frame from the video source while 1
-cap = cv2.VideoCapture('output8_clean.mp4')
+cap = cv2.VideoCapture('output8.mp4')
 # skip to 1000th frame
 #cap.set(cv2.CAP_PROP_POS_FRAMES, 100*25)
 
@@ -110,6 +111,7 @@ class ObjectCounter:
 
     def fire_alarm(self):
         print('‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️‼️')
+        cv2.waitKey(0)
 
     def print(self):
         # print queue as emojis
@@ -198,9 +200,9 @@ cold_areas = []
 
 HOT_TRESHOLD = 200
 HOT_AREA_TRESHOLD = 120
-COLD_TRESHOLD = 200
-COLD_AREA_TRESHOLD = 250
-COLD_AREA_MAX_TRESHOLD = 750
+COLD_TRESHOLD = 190
+COLD_AREA_TRESHOLD = 150
+COLD_AREA_MAX_TRESHOLD = 1500
 
 def classify_using_filters(frame):
     # test gray
@@ -217,10 +219,10 @@ def classify_using_filters(frame):
     hot_mask[hot_mask < HOT_TRESHOLD] = 0
     hot_mask[hot_mask >= HOT_TRESHOLD] = 255
 
-    #hot_mask = cv2.erode(hot_mask, np.ones((1, 7), np.uint8), iterations=1)
-    #hot_mask = cv2.dilate(hot_mask, np.ones((1, 7), np.uint8), iterations=1)
+    hot_mask = cv2.erode(hot_mask, np.ones((1, 7), np.uint8), iterations=1)
+    hot_mask = cv2.dilate(hot_mask, np.ones((1, 7), np.uint8), iterations=1)
     # join these two functions erosion and dilation into one single function called opening
-    hot_mask = cv2.morphologyEx(hot_mask, cv2.MORPH_OPEN, np.ones((1, 7), np.uint8))
+    #hot_mask = cv2.morphologyEx(hot_mask, cv2.MORPH_OPEN, np.ones((1, 7), np.uint8))
 
     contours, _ = cv2.findContours(hot_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     hot_mask = np.zeros(original_shape, np.uint8)
@@ -234,28 +236,52 @@ def classify_using_filters(frame):
 
 
     # Apply linear contrast stretching
-    frame = cv2.convertScaleAbs(frame, alpha=-2.1, beta=50)
-    #frame = np.array(255 * (frame / 255) ** A / 10, dtype='uint8')
+    #frame = cv2.convertScaleAbs(frame, alpha=-2.1, beta=50)
+    #frame = np.array(255 * (frame / 255) ** 20, dtype='uint8')
     #frameRGB = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+
+    #do local histogram equalization
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    frame = clahe.apply(frame)
+
+    #frame = skimage.exposure.equalize_adapthist(frame, clip_limit=0.03)
+
+
+    cv2.imshow('cold_contrast', frame.copy())
 
     cold_mask = cv2.bilateralFilter(frame, 15, 30, 30)
     cold_mask = cv2.medianBlur(cold_mask, 15)
     #mean = cold_mask.copy()
     cold_mask = cv2.bitwise_not(cold_mask)
+    cv2.imshow('cold_mask_bilateral', cold_mask.copy())
+
 
     cold_mask[cold_mask < COLD_TRESHOLD] = 0
     cold_mask[cold_mask >= COLD_TRESHOLD] = 255
+
+    cold_mask = cv2.erode(cold_mask, np.ones((3, 3), np.uint8), iterations=1)
+    cold_mask = cv2.dilate(cold_mask, np.ones((3, 3), np.uint8), iterations=1)
+
+    cv2.imshow('cold_mask_threshold', cold_mask.copy())
+
+    canny = cv2.Canny(cold_mask, 100, 200)
+    cv2.imshow('cold_mask_canny', canny.copy())
+
 
     contours, _ = cv2.findContours(cold_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     cold_mask = np.zeros(original_shape, np.uint8)
 
     for c in contours:
-        approx = cv2.approxPolyDP(c, 0.058 * cv2.arcLength(c, True), True)
+        approx = cv2.approxPolyDP(c, 0.038 * cv2.arcLength(c, True), True)
         hull = cv2.convexHull(approx)
-        area = cv2.contourArea(approx)
+        x,y,w,h = cv2.boundingRect(c)
+        area = w * h
         if COLD_AREA_TRESHOLD < area < COLD_AREA_MAX_TRESHOLD:
-            hull[:, :, 0] += LEFT_GUIDE_X
-            cv2.drawContours(cold_mask, [hull], 0, (255, 255, 255), -1)
+            # shift bbox
+            #cv2.drawContours(cold_mask, [bbox], 0, (255, 255, 255), -1)
+            #draw rectangle with left offset
+            cv2.rectangle(cold_mask, (x + LEFT_GUIDE_X, y), (x + w + LEFT_GUIDE_X, y + h), (255, 255, 255), -1)
+
             cold_areas.append(area)
 
 
@@ -297,7 +323,7 @@ def classify_using_filters_with_svm(frame):
 # create deque of 3 elements
 hot_samples = deque(maxlen=10000)
 
-
+object_counter = ObjectCounter()
 while (cap.isOpened()):
     ret, frame = cap.read()
 
@@ -310,6 +336,7 @@ while (cap.isOpened()):
         # frame = cv2.flip(frame, 0)
 
         #rotate frame 90 degrees
+
         #frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         # crop frame
@@ -334,8 +361,12 @@ while (cap.isOpened()):
 
         hot_mask, cold_mask = classify_using_filters_with_svm(frame)
 
+        object_counter.process(hot_mask, cold_mask)
+
+
         frameRGB[hot_mask == 255] = (0, 0, 255)
         frameRGB[cold_mask == 255] = (255, 0, 0)
+        frameRGB[check_line_y, :] = (0, 255, 0)
 
 
         cv2.imshow('Frame', frameRGB)
@@ -348,7 +379,7 @@ while (cap.isOpened()):
 
 
         # press space to pause
-        continue
+
         if cv2.waitKey(15) & 0xFF == ord(' '):
             while True:
                 if cv2.waitKey(5) & 0xFF == ord(' '):

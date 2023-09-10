@@ -35,7 +35,8 @@ CHECK_LINE_Y = CAM_WIDTH // 2 + 30
 
 GUIDE_DISTANCE = 36
 LEFT_GUIDE_X = 55
-RIGHT_GUIDE_X = 145
+RIGHT_GUIDE_X = 140
+BOTTOM_GUIDE_Y = 220
 
 # create enum for LIVE, TRESHOLD, OVERLAY, DEBUG, SETTINGS
 class Mode:
@@ -395,9 +396,17 @@ class ObjectCounter:
 
         # crop frame to LEFT_GUIDE_X:RIGHT_GUIDE_X
         frame = frame[:, LEFT_GUIDE_X:RIGHT_GUIDE_X]
+        # crop bottom CHECK_LINE_Y pixels
+        frame = frame[:BOTTOM_GUIDE_Y, :]
 
         # gauss
-        frame = cv2.GaussianBlur(frame, (5, 5), 0)
+        #frame = cv2.GaussianBlur(frame, (5, 5), 0)
+
+        # normalize
+        frame = cv2.normalize(frame, None, 0, 3, cv2.NORM_MINMAX)
+        frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
+        cv2.imshow('frame', frame)
+
 
 
         hot_mask = self._find_query_in_frame(self.hot_image, frame, sensitivity=0.85, footprint=(6,6))
@@ -415,7 +424,7 @@ class ObjectCounter:
         region_cold = frame <= thresholds[0]
         cold_mask = self._create_mask(region_cold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
-        cold_mask = self._find_query_in_frame(self.cold_image, frame, sensitivity=0.10, footprint=(3,3))
+        cold_mask = self._find_query_in_frame(self.cold_image, frame, sensitivity=0.1, footprint=(6,6))
         #cold_mask_small = self._find_query_in_frame(self.cold_small_image, frame, sensitivity=0.75, footprint=(6,6))
         #cold_mask = cv2.bitwise_or(cold_mask, cold_mask_small)
 
@@ -503,11 +512,11 @@ class ObjectCounter:
 
         # add hot_mask to debug image at position LEFT_GUIDE_X
         big_hot_mask = np.zeros((256, 192), np.uint8)
-        big_hot_mask[:, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.hot_mask
+        big_hot_mask[:BOTTOM_GUIDE_Y, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.hot_mask
 
         # add cold_mask to debug image at position LEFT_GUIDE_X
         big_cold_mask = np.zeros((256, 192), np.uint8)
-        big_cold_mask[:, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.cold_mask
+        big_cold_mask[:BOTTOM_GUIDE_Y, LEFT_GUIDE_X:RIGHT_GUIDE_X] = self.cold_mask
 
         d_h = cv2.resize(big_hot_mask, (width, height))
         d_c = cv2.resize(big_cold_mask, (width, height))
@@ -527,7 +536,7 @@ class ObjectCounter:
 
 
 class App:
-    def __init__(self, window_title, video_source='./output8.mp4'):
+    def __init__(self, window_title, video_source='./output10.mkv'):
         self.window_title = window_title
         self.video_source = video_source
         self.init_video_source()
@@ -556,7 +565,16 @@ class App:
         if is_mac():
             cv2.resizeWindow(self.window_title, WIDTH, HEIGHT)
             cv2.imshow(self.window_title, np.zeros((HEIGHT, WIDTH, 3), np.uint8))
-            cv2.moveWindow(self.window_title, -500, 0)
+            cv2.moveWindow(self.window_title, 200, 0)
+            def nothing(x):
+                pass
+            cv2.namedWindow('image')
+            cv2.createTrackbar('HOT','image', 0, 100, nothing)
+            cv2.createTrackbar('COLD','image', 0, 100, nothing)
+            cv2.createTrackbar('B','image', 0, 255, nothing)
+
+            switch = '0 : OFF \n1 : ON'
+            cv2.createTrackbar(switch, 'image',0,1,nothing)
         else:
             cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             cv2.moveWindow(self.window_title, -1, -1)
@@ -565,14 +583,22 @@ class App:
     def grab_frame(self):
         ret, frame = self.vid.read()
 
+        camera_matrix = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]], dtype=np.float32)  # Adjust as necessary
+        dist_coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+
+        frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+
         if use_video_file():
             if self.vid.get(cv2.CAP_PROP_POS_FRAMES) == self.vid.get(cv2.CAP_PROP_FRAME_COUNT):
                 self.vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+            # rotate 90
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
             frame = cv2.resize(frame, (192, 256))
             # if self.video_source contains output
-            if self.video_source.startswith('./output'):
-                frame = cv2.flip(frame, 0)
+            #if self.video_source.startswith('./output'):
+                #frame = cv2.flip(frame, 0)
             return ret, frame
         else:
             frame_mid_pos = int(len(frame) / 2)

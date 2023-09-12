@@ -22,10 +22,17 @@ filenames = os.listdir('thermal_images_nothing')
 filenames.sort(key=lambda x: int(x[6:-4]))
 
 for filename in filenames:
-    thermal_images.append(cv2.imread(os.path.join('thermal_images_nothing', filename), cv2.IMREAD_ANYDEPTH))
+    thermal_images.append(cv2.imread(os.path.join('thermal_images', filename), cv2.IMREAD_ANYDEPTH))
 
 
 
+# named window for displaying video and 2 trackbars
+cv2.namedWindow('Thermal Video')
+cv2.namedWindow('Thermal Frame')
+
+# create trackbars for adjusting the temperature range
+cv2.createTrackbar('A', 'Thermal Video', 1, 400, lambda x: None)
+cv2.createTrackbar('B', 'Thermal Video', 1, 400, lambda x: None)
 
 #os.makedirs('thermal_images', exist_ok=True)
 
@@ -37,16 +44,28 @@ while True:
     frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     frame_count += 1
 
+
+
+    ## use (x >> 2) / 16 - 273 to convert to celsius
+    frame = frame >> 2
+    frame = frame / 16
+    frame = frame - 273
+    frame = frame.astype(np.float32)
+
+    min_t = np.min(frame)
+    mean_t = np.mean(frame)
+    max_t = np.max(frame)
+    print(min_t, mean_t, max_t)
+
     # crop to guides
     frame = frame[:, LEFT_GUIDE_X:RIGHT_GUIDE_X]
     frame = frame[:BOTTOM_GUIDE_Y, :]
 
 
 
-    # the frame is in propietary format, holding data in kelvin, using equation t = x / 64 - 273.15
+    # the frame is in propietary format, holding data in kelvin, using equation t = x / 64 - 273
     # we can convert it to celsius
-    frame = frame / 64 - 273.15
-    frame = frame.astype(np.float32)
+
     #frame -= 25 # adjust for the room temperature
 
     #frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
@@ -54,18 +73,18 @@ while True:
 
 
     cold_frame = frame.copy()
-    cold_frame = np.clip(cold_frame, 25, 35)
+    cold_frame = np.clip(cold_frame, min_t, mean_t)
     cold_frame = cv2.normalize(cold_frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     cold_frame = cv2.bitwise_not(cold_frame)
     #cold_frame = cv2.bilateralFilter(cold_frame, 15, 30, 30)
     # otsu thresholding
-    _, cold_frame = cv2.threshold(cold_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    cold_frame = cv2.morphologyEx(cold_frame, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=1)
+    #_, cold_frame = cv2.threshold(cold_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    #cold_frame = cv2.morphologyEx(cold_frame, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=1)
 
 
-    frame_normalized = ((frame - 25) / (100 - 25) * 255).astype(np.uint8)
+    frame_normalized = ((frame - 25) / (35 - 25) * 255).astype(np.uint8)
     frame_normalized[frame < 25] = 0
-    frame_normalized[frame > 100] = 255
+    frame_normalized[frame > 35] = 255
     frame = frame_normalized
     frame = cv2.bitwise_not(frame)
 
@@ -76,7 +95,7 @@ while True:
 
     # Wait for 30 milliseconds before moving to the next frame
     # Adjust the value to control the playback speed
-    if cv2.waitKey(40) & 0xFF == ord('q'):
+    if cv2.waitKey(0) & 0xFF == ord('q'):
         break
 
 # Release the video capture object and close the display window

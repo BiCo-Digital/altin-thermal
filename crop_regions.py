@@ -67,6 +67,7 @@ def draw_histogram(hist_values):
     cv2.imshow('Histogram', hist_img)
 
 
+
 frame_count = 0
 while True:
     # Read a frame from the video file
@@ -83,6 +84,8 @@ while True:
     frame = frame - 273
     frame = frame.astype(np.float32)
 
+
+
     min_t = np.min(frame)
     mean_t = np.mean(frame)
     mod_t = np.median(frame)
@@ -90,19 +93,25 @@ while True:
     max_t = np.max(frame)
     print(min_t, mean_t, max_t)
 
-    # crop to guides
-    crop = frame[:, LEFT_GUIDE_X:RIGHT_GUIDE_X]
-    crop = crop[:BOTTOM_GUIDE_Y, :]
 
-    min_crop_t = np.min(crop)
-    max_crop_t = np.max(crop)
-    # calc mode from crop frame 2D
-    mean_crop_t = np.median(crop)
+    frame = np.clip(frame, min_t, mean_t)
+    #frame = cv2.bilateralFilter(frame, 5, 5, 5)
+    #frame = cv2.GaussianBlur(frame, (7, 7), 0)
+    frame = cv2.medianBlur(frame, 5)
 
 
+    # iterate over rows and color each pixel in row with minimum temperature in row
+    for row in range(frame.shape[0]):
+        min_row_t = np.min(frame[row])
+        #frame[row] = min_row_t
+
+
+    plt.imshow(frame, cmap='gray', interpolation='nearest')
+    plt.show()
+    break
 
     # histogram calc plt
-    hist_values, hist_bins = np.histogram(crop, bins=100, range=(min_crop_t, max_crop_t))
+    hist_values, hist_bins = np.histogram(frame, bins=100, range=(min_t, 49))
 
     peak_index = np.argmax(hist_values)
     peak_crop_t = hist_bins[peak_index]
@@ -117,8 +126,13 @@ while True:
 
     left_crossing_t = hist_bins[left_crossing_index]
 
-    # use opencv to show histogram
-    draw_histogram(hist_values)
+
+    # use plt to show histogram
+    plt.plot(hist_bins[:-1], hist_values)
+    plt.axvline(x=left_crossing_t, color='r')
+    plt.axvline(x=peak_crop_t, color='g')
+    plt.show()
+
 
 
 

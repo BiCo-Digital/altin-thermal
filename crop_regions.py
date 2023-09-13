@@ -98,6 +98,8 @@ while True:
     #frame = cv2.bilateralFilter(frame, 5, 5, 5)
     #frame = cv2.GaussianBlur(frame, (7, 7), 0)
     frame = cv2.medianBlur(frame, 5)
+    # sharpen image
+    #frame = cv2.filter2D(frame, -1, np.array([[-1, -1, -1], [-1, 5, -1], [-1, -1, -1]]))
 
 
     # iterate over rows and color each pixel in row with minimum temperature in row

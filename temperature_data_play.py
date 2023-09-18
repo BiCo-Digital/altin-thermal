@@ -14,13 +14,15 @@ RIGHT_GUIDE_X = 140
 BOTTOM_GUIDE_Y = 220
 
 # Open the video file
-cap = cv2.VideoCapture('video.mkv', apiPreference=cv2.CAP_FFMPEG)
+cap = cv2.VideoCapture('2023-09-14_13-22-09_thermal_u16.mkv', apiPreference=cv2.CAP_FFMPEG)
+
 
 # load thermal images from folder in png as 16 bit grayscale
 thermal_images = []
 filenames = os.listdir(FILEDIR)
 # filenames are in format frame_0000.png, frame_0001.png, ...
 # sort them by frame number
+filenames = [filename for filename in filenames if filename.endswith('.png')]
 filenames.sort(key=lambda x: int(x[6:-4]))
 
 for filename in filenames:
@@ -71,6 +73,12 @@ frame_count = 0
 while True:
     # Read a frame from the video file
     frame = thermal_images[frame_count]
+    #ret, frame =  cap.read()
+
+
+
+
+
     # rotate 90 degrees clockwise
     frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     frame_count += 1
@@ -80,8 +88,11 @@ while True:
     ## use (x >> 2) / 16 - 273 to convert to celsius
     frame = frame >> 2
     frame = frame / 16
-    frame = frame - 273
+    frame = frame - 273.15
     frame = frame.astype(np.float32)
+
+
+
 
     min_t = np.min(frame)
     mean_t = np.mean(frame)
@@ -99,6 +110,10 @@ while True:
     # calc mode from crop frame 2D
     mean_crop_t = np.median(crop)
 
+    cold_frame = frame.copy()
+    cold_frame = np.clip(cold_frame, min_t, mean_t)
+    cold_frame = cv2.normalize(cold_frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    cold_frame = cv2.applyColorMap(cold_frame, cv2.COLORMAP_JET)
 
 
     # histogram calc plt

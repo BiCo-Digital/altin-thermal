@@ -1,4 +1,9 @@
 
+*.png
+
+*.mkv
+
+
 thermal_images/
 
 thermal_images_1/

@@ -14,15 +14,13 @@ RIGHT_GUIDE_X = 140
 BOTTOM_GUIDE_Y = 220
 
 # Open the video file
-cap = cv2.VideoCapture('2023-09-14_13-22-09_thermal_u16.mkv', apiPreference=cv2.CAP_FFMPEG)
-
+cap = cv2.VideoCapture('video.mkv', apiPreference=cv2.CAP_FFMPEG)
 
 # load thermal images from folder in png as 16 bit grayscale
 thermal_images = []
 filenames = os.listdir(FILEDIR)
 # filenames are in format frame_0000.png, frame_0001.png, ...
 # sort them by frame number
-filenames = [filename for filename in filenames if filename.endswith('.png')]
 filenames.sort(key=lambda x: int(x[6:-4]))
 
 for filename in filenames:
@@ -69,16 +67,11 @@ def draw_histogram(hist_values):
     cv2.imshow('Histogram', hist_img)
 
 
+
 frame_count = 0
 while True:
     # Read a frame from the video file
     frame = thermal_images[frame_count]
-    #ret, frame =  cap.read()
-
-
-
-
-
     # rotate 90 degrees clockwise
     frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     frame_count += 1
@@ -88,9 +81,8 @@ while True:
     ## use (x >> 2) / 16 - 273 to convert to celsius
     frame = frame >> 2
     frame = frame / 16
-    frame = frame - 273.15
+    frame = frame - 273
     frame = frame.astype(np.float32)
-
 
 
 
@@ -101,23 +93,27 @@ while True:
     max_t = np.max(frame)
     print(min_t, mean_t, max_t)
 
-    # crop to guides
-    crop = frame[:, LEFT_GUIDE_X:RIGHT_GUIDE_X]
-    crop = crop[:BOTTOM_GUIDE_Y, :]
 
-    min_crop_t = np.min(crop)
-    max_crop_t = np.max(crop)
-    # calc mode from crop frame 2D
-    mean_crop_t = np.median(crop)
+    frame = np.clip(frame, min_t, mean_t)
+    #frame = cv2.bilateralFilter(frame, 5, 5, 5)
+    #frame = cv2.GaussianBlur(frame, (7, 7), 0)
+    frame = cv2.medianBlur(frame, 5)
+    # sharpen image
+    #frame = cv2.filter2D(frame, -1, np.array([[-1, -1, -1], [-1, 5, -1], [-1, -1, -1]]))
 
-    cold_frame = frame.copy()
-    cold_frame = np.clip(cold_frame, min_t, mean_t)
-    cold_frame = cv2.normalize(cold_frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    cold_frame = cv2.applyColorMap(cold_frame, cv2.COLORMAP_JET)
 
+    # iterate over rows and color each pixel in row with minimum temperature in row
+    for row in range(frame.shape[0]):
+        min_row_t = np.min(frame[row])
+        #frame[row] = min_row_t
+
+
+    plt.imshow(frame, cmap='gray', interpolation='nearest')
+    plt.show()
+    break
 
     # histogram calc plt
-    hist_values, hist_bins = np.histogram(crop, bins=100, range=(min_crop_t, max_crop_t))
+    hist_values, hist_bins = np.histogram(frame, bins=100, range=(min_t, 49))
 
     peak_index = np.argmax(hist_values)
     peak_crop_t = hist_bins[peak_index]
@@ -132,8 +128,13 @@ while True:
 
     left_crossing_t = hist_bins[left_crossing_index]
 
-    # use opencv to show histogram
-    draw_histogram(hist_values)
+
+    # use plt to show histogram
+    plt.plot(hist_bins[:-1], hist_values)
+    plt.axvline(x=left_crossing_t, color='r')
+    plt.axvline(x=peak_crop_t, color='g')
+    plt.show()
+
 
 
 

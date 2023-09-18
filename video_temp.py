@@ -9,7 +9,7 @@ LEFT_GUIDE_X = 10
 RIGHT_GUIDE_X = 140
 BOTTOM_GUIDE_Y = 220
 
-DIR_NAME = "/Users/matejnevlud/github/altin-thermal/orkla1"
+DIR_NAME = "/Users/matejnevlud/github/altin-thermal/thermal_images_2023-09-18_07-41-20"
 thermal_images = []
 filenames = os.listdir(DIR_NAME)
 # filenames are in format frame_0000.png, frame_0001.png, ...
@@ -95,7 +95,7 @@ while 1:
         cropped_frame = cv2.warpPerspective(frame, M, (100, 100))
         cropped_frame = np.clip(cropped_frame, min_t, mean_t)
 
-
+        continue
         mean_crop_t = np.mean(cropped_frame)
         std_crop_t = np.std(cropped_frame)
         var_crop_t = np.var(cropped_frame)
@@ -120,9 +120,6 @@ while 1:
 
         # print the mean temperature, std and var in the top left corner
         ax2.text2D(0.05, 0.95, f"mean: {mean_crop_t:.2f}\nmin_crop_t: {min_crop_t:.2f}\nmean - min: {mean_to_min_t:.2f}", transform=ax2.transAxes)
-
-
-
         plt.waitforbuttonpress()
 
 
@@ -133,7 +130,7 @@ while 1:
     # instead of cropping the frame, set all the values outside the hot lines (min_x, max_x) to the closest value inside the hot lines (min_x, max_x)
     #soups_frame = frame[:, min_x:max_x]
     soups_frame = frame.copy()
-    soups_frame = np.clip(soups_frame, min_t, k)
+    soups_frame = np.clip(soups_frame, min_t, 50)
     for x in range(soups_frame.shape[1]):
         if x < min_x:
             soups_frame[:, x] = soups_frame[:, min_x]
@@ -199,7 +196,7 @@ while 1:
     plt.draw()
     plt.gcf().canvas.mpl_connect('key_press_event', lambda event: [exit(0) if event.key == 'escape' or event.key == 'q' else None])
     #plt.cla()
-    plt.waitforbuttonpress()
+    #plt.waitforbuttonpress()
 
 
 

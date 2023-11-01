@@ -1,0 +1,2 @@
+queue_min_t: 27.04, queue_delta_t 22.96, last_min_t_z_score: 7.40
+soup_min_t: 35.35, soup_delta_t 14.65, soup_min_t_z_score: 6.54, soup_avg_t: 40.53

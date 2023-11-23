@@ -5,7 +5,6 @@ import datetime
 url = "http://localhost:8888/api/event"
 
 current_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-yesterday_timestamp = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
 # Set the form data and images
 form_data = {

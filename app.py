@@ -10,6 +10,8 @@ from picamera2.encoders import H264Encoder, Quality
 from picamera2.outputs import CircularOutput
 import threading
 from gpiozero import OutputDevice
+import requests
+
 os.chdir('/home/matejnevlud/')
 
 
@@ -70,6 +72,8 @@ thermal_frame = np.zeros((192, 256), dtype=np.float32)
 max_t_deque = deque(maxlen=100)
 min_t_deque = deque(maxlen=100)
 mean_t_deque = deque(maxlen=100)
+
+TEMP_TRESHOLD = 4
 
 DEQUE_LEN = 200
 soup_area_deque = deque(maxlen=200)
@@ -175,29 +179,46 @@ relay_pin = OutputDevice(26, active_high=False)
 relay_pin.off()
 
 
-trigger_delay = 2.0
+trigger_delay = 2.2
 trigger_duration = 0.4
 fire = False
 last_fire_frames  = []
-def fire_trigger():
+
+def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, q_delta_t, timestamp, image_thermal, image_color):
+    form_data = {
+        "line": line,
+        "min_t": min_t,
+        "avg_t": avg_t,
+        "delta_t": delta_t,
+        "max_t": max_t,
+        "min_t_zscore": min_t_zscore,
+        "q_min_t": q_min_t,
+        "q_delta_t": q_delta_t,
+        "timestamp": timestamp,
+    }
+
+    files = {
+        "image_thermal": ('image_thermal.png', open(image_thermal, "rb"), "image/png"),
+        "image_color": ('image_color.png', open(image_color, "rb"), "image/png"),
+    }
+
+    def send_request():
+        response = requests.post("https://altin-admin.vercel.app/api/event", data=form_data, files=files)
+        if response.status_code == 200:
+            print("Request successful!", response.text)
+        else:
+            print("Request failed.")
+
+    thread = threading.Thread(target=send_request)
+    thread.start()
+
+def fire_trigger(soup_min_t, soup_min_t_z_score, soup_min_t_deque ):
     
     def fire_trigger_on_thread():
         global fire
         if fire:
             return
         fire = True
-        today_dir = 'X' + datetime.datetime.now().strftime("%Y-%m-%d")
-        os.makedirs(today_dir, exist_ok=True)
-        short_timestamp = datetime.datetime.now().strftime("%H-%M-%S")
-        global last_fire_frames
-        last_fire_frames.append(cv2.applyColorMap(cv2.normalize(last_thermal_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET))
-        print(f'🔥🔥🔥🔥🔥🔥🔥🔥 min_t: {soup_min_t:.2f}, soup_avg_t {soup_avg_t:.2f},   soup_min_t_z_score: {soup_min_t_z_score:.2f} [{short_timestamp}]', )
-        cv2.imwrite(f'{today_dir}/frame_{short_timestamp}_{str(int(soup_min_t_z_score))}.png', cv2.applyColorMap(cv2.normalize(soup_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET))
-        with open(f'{today_dir}/frame_{short_timestamp}_{str(int(soup_min_t_z_score))}.txt', 'w') as f:
-            f.write(f'queue_min_t: {np.nanmean(soup_min_t_deque):.2f}, queue_delta_t {np.nanmean(soup_delta_t_deque):.2f}, last_min_t_z_score: {last_soup_min_t_z_score:.2f}\n')
-            f.write(f'soup_min_t: {soup_min_t:.2f}, soup_delta_t {soup_delta_t:.2f}, soup_min_t_z_score: {soup_min_t_z_score:.2f}, soup_avg_t: {soup_avg_t:.2f}\n')
-        
-        #save_frame_buffers_to_disk_on_separate_thread()
 
         time.sleep(trigger_delay)
         # TODO RELAY ACTIVATE ON
@@ -211,6 +232,24 @@ def fire_trigger():
     t = threading.Thread(target=fire_trigger_on_thread)
     t.start()
 
+
+    today_dir = 'X' + datetime.datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(today_dir, exist_ok=True)
+    current_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    short_timestamp = datetime.datetime.now().strftime("%H-%M-%S")
+    global last_fire_frames
+    last_fire_frames.append(cv2.applyColorMap(cv2.normalize(last_thermal_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET))
+    print(f'🔥🔥🔥🔥🔥🔥🔥🔥 min_t: {soup_min_t:.2f}, soup_avg_t {soup_avg_t:.2f},   soup_min_t_z_score: {soup_min_t_z_score:.2f} [{short_timestamp}]', )
+
+    thermal_picture_path = f'{today_dir}/frame_{short_timestamp}_{str(int(soup_min_t_z_score))}.png'
+
+    cv2.imwrite(thermal_picture_path, cv2.rotate(cv2.applyColorMap(cv2.normalize(soup_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET), cv2.ROTATE_90_CLOCKWISE))
+
+    with open(f'{today_dir}/frame_{short_timestamp}_{str(int(soup_min_t_z_score))}.txt', 'w') as f:
+        f.write(f'queue_min_t: {np.nanmean(soup_min_t_deque):.2f}, queue_delta_t {np.nanmean(soup_delta_t_deque):.2f}, last_min_t_z_score: {last_soup_min_t_z_score:.2f}\n')
+        f.write(f'soup_min_t: {soup_min_t:.2f}, soup_delta_t {soup_delta_t:.2f}, soup_min_t_z_score: {soup_min_t_z_score:.2f}, soup_avg_t: {soup_avg_t:.2f}\n')
+    
+    upload_to_server(2, soup_min_t, soup_avg_t, soup_delta_t, soup_max_t, soup_min_t_z_score, np.nanmean(soup_min_t_deque), np.nanmean(soup_delta_t_deque), current_timestamp, thermal_picture_path, thermal_picture_path)
 
 
 
@@ -349,8 +388,8 @@ while 1:
         soup_delta_t_z_score = (soup_delta_t - np.nanmean(soup_delta_t_deque)) / np.nanstd(soup_delta_t_deque)
         soup_min_t_z_score = (soup_min_t - np.nanmean(soup_min_t_deque)) / np.nanstd(soup_min_t_deque)
         
-        if((soup_min_t_z_score > 4.5 or soup_min_t - np.nanmean(soup_min_t_deque) > 4) and len(soup_min_t_deque) > DEQUE_LEN / 2):
-            fire_trigger()
+        if((soup_min_t_z_score > 9999 or soup_min_t - np.nanmean(soup_min_t_deque) > TEMP_TRESHOLD) and len(soup_min_t_deque) > DEQUE_LEN / 2):
+            fire_trigger(soup_min_t, soup_min_t_z_score, np.nanmean(soup_min_t_deque))
             
         last_soup_min_t_z_score = soup_min_t_z_score
         
@@ -375,20 +414,36 @@ while 1:
     
     
     # overlay frame on thermal image
-    thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 
-                                                                      (np.nanmean(soup_min_t_deque) if len(soup_min_t_deque) > 100 else 20),
-                                                                      (np.nanmean(soup_avg_t_deque) if len(soup_avg_t_deque) > 100 else 100)), 
-                                                                      None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET)
+    thermal_picture_colored = cv2.applyColorMap(cv2.normalize(thermal_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET)
+
+
+
+
+    
+
+    
     
     if (len(soup_min_t_deque) > DEQUE_LEN / 2):
+        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 0, 45), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_INFERNO)
+        # dim down colors
+        #thermal_picture_colored = cv2.addWeighted(thermal_picture_colored, 0.5, thermal_picture_colored, 0, 0)
         # set areas with np.nanmean(soup_min_t_deque) > 4 to 2, np.nanmean(soup_min_t_deque) < 4 to 0, else 1
-        thermal_picture_colored = thermal_frame.copy()
-        thermal_picture_colored[thermal_frame < np.nanmean(soup_min_t_deque) - 4] = 0
-        thermal_picture_colored[thermal_frame > np.nanmean(soup_min_t_deque) + 4] = 255
-        thermal_picture_colored[(thermal_frame >= np.nanmean(soup_min_t_deque) - 4) & (thermal_frame <= np.nanmean(soup_min_t_deque) + 4)] = 0
-        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(thermal_picture_colored, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET)
-
-        thermal_picture_colored = cv2.addWeighted(cv2.cvtColor(pi_frame_mask, cv2.COLOR_GRAY2RGB), 0.6, thermal_picture_colored , 0.6, 0)
+        thermal_picture_bin = np.zeros(thermal_frame.shape, dtype=np.uint8)
+        thermal_picture_bin[thermal_frame < np.nanmean(soup_min_t_deque) - 4] = 255
+        thermal_picture_bin[thermal_frame > np.nanmean(soup_min_t_deque) + 4] = 0
+        thermal_picture_bin[(thermal_frame >= np.nanmean(soup_min_t_deque) - 4) & (thermal_frame <= np.nanmean(soup_min_t_deque) + 4)] = 255
+        
+        # find contours in thermal_picture_bin
+        contours, hierarchy = cv2.findContours(thermal_picture_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # draw rectangles around contours on thermal_picture_colored
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            area = cv2.contourArea(cnt)
+            # make sure that the rect doesnt touch any side of the frame
+            if area > 60:
+                if x > 0 and y > 0 and x + w < 192 and y + h < 256:
+                    #cv2.rectangle(thermal_picture_colored, (x, y), (x + w, y + h), (255, 255, 0), 4)
+                    cv2.drawContours(thermal_picture_colored, [cnt], 0, (0, 255, 0), 4)
 
     cv2.circle(thermal_picture_colored, (16, 16), 8, (0, 255, 255), 1)
     if len(soup_min_t_deque) > DEQUE_LEN / 2:
@@ -448,6 +503,7 @@ while 1:
         break
 
 picam2.stop()
+relay_pin.off()
 cv2.destroyAllWindows()
 
-save_frame_buffers_to_disk()
+#save_frame_buffers_to_disk()

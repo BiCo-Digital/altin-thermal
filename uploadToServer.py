@@ -33,3 +33,35 @@ if response.status_code == 200:
 else:
     print("Request failed.")
 
+
+
+import requests
+import threading
+
+def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, q_delta_t, timestamp, image_thermal, image_color):
+    form_data = {
+        "line": line,
+        "min_t": min_t,
+        "avg_t": avg_t,
+        "delta_t": delta_t,
+        "max_t": max_t,
+        "min_t_zscore": min_t_zscore,
+        "q_min_t": q_min_t,
+        "q_delta_t": q_delta_t,
+        "timestamp": timestamp,
+    }
+
+    files = {
+        "image_thermal": ('image_thermal.png', open(f'experiments/{image_thermal}', "rb"), "image/png"),
+        "image_color": ('image_color.png', open(f'experiments/thermal_images_1/frame_0002.png', "rb"), "image/png"),
+    }
+
+    def send_request():
+        response = requests.post("http://localhost:8888/api/event", data=form_data, files=files)
+        if response.status_code == 200:
+            print("Request successful!", response.text)
+        else:
+            print("Request failed.")
+
+    thread = threading.Thread(target=send_request)
+    thread.start()

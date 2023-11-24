@@ -215,18 +215,16 @@ def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, 
 def fire_trigger(soup_min_t, soup_min_t_z_score, soup_min_t_deque ):
     
     def fire_trigger_on_thread():
+        time.sleep(trigger_delay)
         global fire
         if fire:
             return
+        
         fire = True
-
-        time.sleep(trigger_delay)
-        # TODO RELAY ACTIVATE ON
         if trigger_duration > 0:
             relay_pin.on()
             time.sleep(trigger_duration)
             relay_pin.off()
-
         fire = False
 
     t = threading.Thread(target=fire_trigger_on_thread)
@@ -424,7 +422,7 @@ while 1:
     
     
     if (len(soup_min_t_deque) > DEQUE_LEN / 2):
-        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 0, 45), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_INFERNO)
+        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 0, 40), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_BONE)
         # dim down colors
         #thermal_picture_colored = cv2.addWeighted(thermal_picture_colored, 0.5, thermal_picture_colored, 0, 0)
         # set areas with np.nanmean(soup_min_t_deque) > 4 to 2, np.nanmean(soup_min_t_deque) < 4 to 0, else 1

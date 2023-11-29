@@ -445,14 +445,14 @@ while 1:
     
     
     if (len(soup_min_t_deque) > DEQUE_LEN / 2):
-        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 0, 40), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_BONE)
+        thermal_picture_colored = cv2.applyColorMap(cv2.normalize(np.clip(thermal_frame, 15, 35), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_BONE)
         # dim down colors
         #thermal_picture_colored = cv2.addWeighted(thermal_picture_colored, 0.5, thermal_picture_colored, 0, 0)
         # set areas with np.nanmean(soup_min_t_deque) > 4 to 2, np.nanmean(soup_min_t_deque) < 4 to 0, else 1
         thermal_picture_bin = np.zeros(thermal_frame.shape, dtype=np.uint8)
-        thermal_picture_bin[thermal_frame < np.nanmean(soup_min_t_deque) - 4] = 255
-        thermal_picture_bin[thermal_frame > np.nanmean(soup_min_t_deque) + 4] = 0
-        thermal_picture_bin[(thermal_frame >= np.nanmean(soup_min_t_deque) - 4) & (thermal_frame <= np.nanmean(soup_min_t_deque) + 4)] = 255
+        thermal_picture_bin[thermal_frame < np.nanmean(soup_min_t_deque) - TEMP_TRESHOLD] = 255
+        thermal_picture_bin[thermal_frame > np.nanmean(soup_min_t_deque) + TEMP_TRESHOLD] = 0
+        thermal_picture_bin[(thermal_frame >= np.nanmean(soup_min_t_deque) - TEMP_TRESHOLD) & (thermal_frame <= np.nanmean(soup_min_t_deque) + TEMP_TRESHOLD)] = 255
         
         # find contours in thermal_picture_bin
         contours, hierarchy = cv2.findContours(thermal_picture_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

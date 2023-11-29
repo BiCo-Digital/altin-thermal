@@ -11,9 +11,10 @@ from picamera2.outputs import CircularOutput
 import threading
 from gpiozero import OutputDevice
 import requests
+import pytz
 
 os.chdir('/home/matejnevlud/')
-
+timezone = pytz.timezone("Europe/Prague")
 
 # load settings file if exists
 # if not, create default settings file
@@ -73,7 +74,7 @@ max_t_deque = deque(maxlen=100)
 min_t_deque = deque(maxlen=100)
 mean_t_deque = deque(maxlen=100)
 
-TEMP_TRESHOLD = 4
+TEMP_TRESHOLD = 3.5
 
 DEQUE_LEN = 200
 soup_area_deque = deque(maxlen=200)
@@ -92,7 +93,7 @@ def preprocess_pi_frame(pi_frame):
 
     #pts1 = np.float32([[75, 0], [160, 0], [67, 207], [180, 220]])
     #pts2 = np.float32([[0, 0], [192, 0], [0, 340], [192, 340]])
-    pts1 = np.float32([[60, 58], [172, 55], [55, 215], [190, 225]])
+    pts1 = np.float32([[50, 58 - 5], [172, 55 - 5], [45, 215 + 5], [190, 225 + 5]])
     pts2 = np.float32([[0, 0], [192, 0], [0, 256], [192, 256]])
 
     # I want to double the resolution of input image, double points
@@ -123,6 +124,13 @@ def detect_soups(pi_frame_foreground):
             soup_area_deque.append(area)
             cv2.drawContours(pi_frame_foreground, [hull], 0, (255, 255, 255), -1)
             cv2.rectangle(pi_frame_foreground, (x, y), (x + w, y + h), (255, 255, 255), 2)
+
+            # make bounding box a bit smaller (about 20%), remember that numbers must be integers
+            x += int(w * 0.1)
+            y += int(h * 0.1)
+            w = int(w * 0.8)
+            h = int(h * 0.8)
+            
             soups_rects.append((x, y, w, h))
 
     return pi_frame_foreground, soups_rects
@@ -184,7 +192,20 @@ trigger_duration = 0.4
 fire = False
 last_fire_frames  = []
 
-def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, q_delta_t, timestamp, image_thermal, image_color):
+ 
+currently_ongoing_upload_timestamps_seconds = []
+def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, q_delta_t, current_datetime, image_thermal, image_color):
+    # with timezone ISO 8601, with time zone as UTC offset
+    current_timestamp = current_datetime.strftime("%Y-%m-%dT%H:%M:%S%z")
+    short_timestamp = current_datetime.strftime("%H-%M-%S")
+
+    # check if there is already an upload in progress based on short_timestamp
+    if short_timestamp in currently_ongoing_upload_timestamps_seconds:
+        return
+    
+    # add short_timestamp to currently_ongoing_upload_timestamps_seconds
+    currently_ongoing_upload_timestamps_seconds.append(short_timestamp)
+
     form_data = {
         "line": line,
         "min_t": min_t,
@@ -194,7 +215,7 @@ def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, 
         "min_t_zscore": min_t_zscore,
         "q_min_t": q_min_t,
         "q_delta_t": q_delta_t,
-        "timestamp": timestamp,
+        "timestamp": current_timestamp,
     }
 
     files = {
@@ -208,8 +229,9 @@ def upload_to_server(line, min_t, avg_t, delta_t, max_t, min_t_zscore, q_min_t, 
             print("Request successful!", response.text)
         else:
             print("Request failed.")
-
+            
     thread = threading.Thread(target=send_request)
+    thread.finished = lambda: currently_ongoing_upload_timestamps_seconds.remove(short_timestamp)
     thread.start()
 
 def fire_trigger(soup_min_t, soup_min_t_z_score, soup_min_t_deque ):
@@ -233,8 +255,9 @@ def fire_trigger(soup_min_t, soup_min_t_z_score, soup_min_t_deque ):
 
     today_dir = 'X' + datetime.datetime.now().strftime("%Y-%m-%d")
     os.makedirs(today_dir, exist_ok=True)
-    current_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    short_timestamp = datetime.datetime.now().strftime("%H-%M-%S")
+    current_datetime = datetime.datetime.now(timezone)
+    current_timestamp = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    short_timestamp = current_datetime.strftime("%H-%M-%S")
     global last_fire_frames
     last_fire_frames.append(cv2.applyColorMap(cv2.normalize(last_thermal_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET))
     print(f'🔥🔥🔥🔥🔥🔥🔥🔥 min_t: {soup_min_t:.2f}, soup_avg_t {soup_avg_t:.2f},   soup_min_t_z_score: {soup_min_t_z_score:.2f} [{short_timestamp}]', )
@@ -247,7 +270,7 @@ def fire_trigger(soup_min_t, soup_min_t_z_score, soup_min_t_deque ):
         f.write(f'queue_min_t: {np.nanmean(soup_min_t_deque):.2f}, queue_delta_t {np.nanmean(soup_delta_t_deque):.2f}, last_min_t_z_score: {last_soup_min_t_z_score:.2f}\n')
         f.write(f'soup_min_t: {soup_min_t:.2f}, soup_delta_t {soup_delta_t:.2f}, soup_min_t_z_score: {soup_min_t_z_score:.2f}, soup_avg_t: {soup_avg_t:.2f}\n')
     
-    upload_to_server(2, soup_min_t, soup_avg_t, soup_delta_t, soup_max_t, soup_min_t_z_score, np.nanmean(soup_min_t_deque), np.nanmean(soup_delta_t_deque), current_timestamp, thermal_picture_path, thermal_picture_path)
+    upload_to_server(2, soup_min_t, soup_avg_t, soup_delta_t, soup_max_t, soup_min_t_z_score, np.nanmean(soup_min_t_deque), np.nanmean(soup_delta_t_deque), current_datetime, thermal_picture_path, thermal_picture_path)
 
 
 
@@ -315,7 +338,7 @@ def onMouseClick(event, x, y, flags, param):
         if didHitButton(x_offset + third_width * 2, 40 + third_width + 40, third_width, third_width, x, y):
             trigger_duration += 0.1
 cv2.setMouseCallback('thermal_picture_colored', onMouseClick)
-
+last_soup_thermal_frame = np.zeros((256, 192, 3), dtype=np.uint8)
 last_thermal_frame = None
 while 1:
     app_led.off()
@@ -365,7 +388,6 @@ while 1:
     # remove soups_rects from thermal_frame
     soups_frames = []
     thermal_frame_without_soups = thermal_frame.copy()
-    soups_frame = np.zeros(thermal_frame.shape, dtype=np.float32)
     for x, y, w, h in soups_rects:
         soup_frame = thermal_frame[y:y+h, x:x+w].copy()
         
@@ -393,8 +415,9 @@ while 1:
         
         thermal_frame_without_soups[y:y+h, x:x+w] = np.nan
         
-        # paste soup_frame into soups_frame
-        soups_frame[y:y+h, x:x+w] = soup_frame
+        # paste soup_frame into last_soup_thermal_frame
+        last_soup_thermal_frame = np.zeros((256, 192, 3), dtype=np.uint8)
+        last_soup_thermal_frame[y:y+h, x:x+w] = cv2.applyColorMap(cv2.normalize(np.clip(soup_frame, 20, 30), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET)
 
         last_soup_timestamp = datetime.datetime.now()
         
@@ -448,7 +471,7 @@ while 1:
         cv2.circle(thermal_picture_colored, (16, 16), 8, (0, 255, 255), -1)
         
 
-    # if soups_frame is not empty, toggle app_led
+    # if last_soup_thermal_frame is not empty, toggle app_led
     cv2.circle(thermal_picture_colored, (16, 16 + 20), 8, (0, 255, 0), 1)
     if len(soups_rects) > 0:
         app_led.on()
@@ -465,7 +488,8 @@ while 1:
     right_image = np.zeros((256, 192, 3), dtype=np.uint8)
     if debug_screen_state == 0:
         left_image = thermal_picture_colored
-        right_image = draw_mosaic()
+        if last_soup_thermal_frame is not None:
+            right_image = draw_mosaic()
     if debug_screen_state == 1:
         left_image = pi_frame
         right_image = draw_settings()
@@ -473,6 +497,7 @@ while 1:
         left_image = cv2.cvtColor(pi_frame_fg, cv2.COLOR_GRAY2RGB)
     if debug_screen_state == 3:
         left_image = cv2.cvtColor(pi_frame_mask, cv2.COLOR_GRAY2RGB)
+        right_image = last_soup_thermal_frame
     
     
 
@@ -480,11 +505,13 @@ while 1:
 
 
     # calculate FPS
+    
+    # set timezone to Europe/Prague so datetime.now() returns correct time
     now = time.time()
     fps = 1 / (now - last_time)
     last_time = now
     print(f'fps: {fps:.2f}, soup_min_t: {np.nanmean(soup_min_t_deque):.2f}, soup_avg_t {np.nanmean(soup_avg_t_deque):.2f}', f'🍲 soup_min_t_z_score: {last_soup_min_t_z_score:.2f}' if len(soups_rects) > 0 else '  ', end='\r')
-
+    
     
     # create doublewidth frame thermal_picture_colored
     double_width_frame = np.zeros((256, 384, 3), dtype=np.uint8)
@@ -492,6 +519,11 @@ while 1:
     double_width_frame[:, 192:, :] = right_image
     # print fps on the frame
     cv2.putText(double_width_frame, f'{fps:.0f}', (6, double_width_frame.shape[0] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if fps > 20 else (0, 0, 255), 2)
+    # print last soup_min_t with avg mean of soupmint deque on the frame
+    last_soup_min_t = soup_min_t_deque[-1] if len(soup_min_t_deque) > 0 else 0
+    cv2.putText(double_width_frame, f'{last_soup_min_t:.2f} / {np.nanmean(soup_min_t_deque):.2f}', (6, double_width_frame.shape[0] - 6 - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+
     cv2.imshow('thermal_picture_colored', double_width_frame)
 
 

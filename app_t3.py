@@ -13,7 +13,9 @@ from gpiozero import OutputDevice
 import requests
 import pytz
 
-from ht301_hacklib import device_info, info
+from ht301_hacklib import device_info, info, HT301
+from flask import Flask, Response
+from flask import request
 
 os.chdir('/home/matejnevlud/')
 timezone = pytz.timezone("Europe/Prague")
@@ -30,20 +32,31 @@ THERMAL_HEIGHT = 288
 
 
 
+
+
 def init_camera():
     # Configure camera for 2304, 1296 mode
     picam2 = Picamera2()
-    video_config = picam2.create_video_configuration({'size': (THERMAL_WIDTH // 2, THERMAL_HEIGHT // 2), 'format': 'XBGR8888'},
-                                                     raw={'size': (2304, 1296)},
+    video_config = picam2.create_video_configuration({'size': (1536 // 2, 864 // 2), 'format': 'XBGR8888'},
+                                                     raw={'size': (1536, 864)},
                                                      controls={'NoiseReductionMode': 0, 'FrameRate': 50})
     picam2.configure(video_config)
     picam2.start_preview()
-    encoder = JpegEncoder()
+    encoder = H264Encoder()
     encoder.output = CircularOutput()
     picam2.encoder = encoder
     picam2.start()
     picam2.start_encoder(encoder=encoder, quality=Quality.LOW)
 
+
+
+    # calibrate T3 camera
+    opecv_cap = HT301()
+    ret, frame = opecv_cap.read()
+    opecv_cap.calibrate()
+    opecv_cap.release()
+
+    time.sleep(2)
 
     thermalcamera = Picamera2(1)
     thermalcamera.configure(thermalcamera.create_video_configuration(raw=True))
@@ -94,20 +107,19 @@ last_soup_timestamp = datetime.datetime.now()
 last_soup_min_t_z_score = 0
 
 def preprocess_pi_frame(pi_frame):
-    pi_frame = cv2.cvtColor(pi_frame, cv2.COLOR_BGR2RGB)
-    pi_frame = cv2.rotate(pi_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    #pi_frame = cv2.rotate(pi_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     #cv2.imshow('pi_frame0', pi_frame)
 
-    #pts1 = np.float32([[75, 0], [160, 0], [67, 207], [180, 220]])
-    #pts2 = np.float32([[0, 0], [THERMAL_HEIGHT, 0], [0, 340], [THERMAL_HEIGHT, 340]])
-    pts1 = np.float32([[50, 58 - 5], [172, 55 - 5], [45, 215 + 5], [190, 225 + 5]])
-    pts2 = np.float32([[0, 0], [THERMAL_HEIGHT, 0], [0, THERMAL_WIDTH], [THERMAL_HEIGHT, THERMAL_WIDTH]])
+    # set M to the matrix from perspective.py
 
-    # I want to double the resolution of input image, double points
+    M = np.array([[ 2.17890949e+00, 2.23037980e-01, -6.97285351e+02],
+                  [-7.46137162e-02, 2.26825697e+00, -3.76679885e+02],
+                  [-4.86080584e-04, 4.75523387e-04, 1.00000000e+00]])
 
-    M = cv2.getPerspectiveTransform(pts1, pts2)
-    pi_frame = cv2.warpPerspective(pi_frame, M, (THERMAL_HEIGHT, THERMAL_WIDTH), flags=cv2.INTER_NEAREST)
-
+    pi_frame = cv2.warpPerspective(pi_frame, M, (THERMAL_WIDTH, THERMAL_HEIGHT), flags=cv2.INTER_NEAREST)
+    pi_frame = cv2.cvtColor(pi_frame, cv2.COLOR_BGR2RGB)
+    pi_frame = cv2.rotate(pi_frame, cv2.ROTATE_90_CLOCKWISE)
     #pyramid mean shift filtering
     #pi_frame = cv2.pyrMeanShiftFiltering(pi_frame, 3, 3)
     #pi_frame = cv2.bilateralFilter(pi_frame, 15, 30, 90)
@@ -143,6 +155,8 @@ def detect_soups(pi_frame_foreground):
     return pi_frame_foreground, soups_rects
 
 def preprocess_thermal_frame(frame_usb):
+
+
     RAW_THERMAL_WIDTH = THERMAL_WIDTH
     RAW_THERMAL_HEIGHT = THERMAL_HEIGHT + 4
 
@@ -359,6 +373,68 @@ def onMouseClick(event, x, y, flags, param):
 cv2.setMouseCallback('thermal_picture_colored', onMouseClick)
 last_soup_thermal_frame = np.zeros((THERMAL_WIDTH, THERMAL_HEIGHT, 3), dtype=np.uint8)
 last_thermal_frame = None
+thermal_picture_colored = None
+double_width_frame = None
+
+# init Flask APP for streaming thermal images
+app = Flask(__name__)
+
+def generate_frames():
+    while True:
+        # set framerate to 10 fps
+        time.sleep(0.3)
+        frame = double_width_frame
+        if frame is None:
+            continue
+        else:
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/thermal_feed')
+def video_feed():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+
+@app.route('/', methods=['GET'])
+def settings_screen_get():
+    # write simple html page with settings and textinput
+    html = f'''
+    <html>
+        <body>
+            <h1>ALTIN LN1</h1>
+            <form action="/" method="post">
+                <p>Zpoždění fouknutí: <input type="text" name="trigger_delay" value="{trigger_delay}" /></p>
+                <p>Délka fouknutí: <input type="text" name="trigger_duration" value="{trigger_duration}" /></p>
+                <p><input type="submit" value="Uložit" /></p>
+            </form>
+            <img src="http://localhost:8080/thermal_feed" width="576" height="384">
+        </body>
+    </html>
+    '''
+    return html
+
+@app.route('/', methods=['POST'])
+def settings_screen_post():
+
+    global trigger_delay, trigger_duration
+    trigger_delay = float(request.form['trigger_delay'])
+    trigger_duration = float(request.form['trigger_duration'])
+
+    # redirect to settings screen
+    return settings_screen_get()
+
+
+# start Flask APP on port 8080 in non-blocking mode
+thread = threading.Thread(target=app.run, kwargs={'host':'0.0.0.0', 'port':'8080'})
+thread.daemon = True
+thread.start()
+
+
+
 while 1:
     app_led.off()
     soup_led.off()
@@ -370,6 +446,8 @@ while 1:
 
     pi_frame = preprocess_pi_frame(pi_frame)
 
+
+    pi_frame_fg = np.zeros((THERMAL_WIDTH, THERMAL_HEIGHT), dtype=np.uint8)
     pi_frame_fg = bgsub.apply(pi_frame)
     #pi_frame_mask[pi_frame_mask < 250] = 0
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
@@ -456,6 +534,10 @@ while 1:
     # overlay frame on thermal image
     thermal_picture_colored = cv2.applyColorMap(cv2.normalize(thermal_frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U), cv2.COLORMAP_JET)
 
+    # draw min T
+    min_t = np.nanmin(thermal_frame)
+    min_t_pos = np.unravel_index(np.nanargmin(thermal_frame), thermal_frame.shape)
+    cv2.circle(thermal_picture_colored, (min_t_pos[1], min_t_pos[0]), 8, (255, 255, 255), 1)
 
 
 
@@ -474,11 +556,6 @@ while 1:
         thermal_picture_bin[thermal_frame > soup_min_t_deque_mean + TEMP_TRESHOLD] = 0
         thermal_picture_bin[(thermal_frame >= soup_min_t_deque_mean - TEMP_TRESHOLD) & (thermal_frame <= soup_min_t_deque_mean + TEMP_TRESHOLD)] = 255
 
-        # find in thermal_frame lowest temperature point
-        min_t = np.nanmin(thermal_frame)
-        min_t_pos = np.unravel_index(np.nanargmin(thermal_frame), thermal_frame.shape)
-
-        # draw circle in the lowest temperature point on thermal_picture_colored with white color
         cv2.circle(thermal_picture_colored, (min_t_pos[1], min_t_pos[0]), 8, (255, 255, 255), 1)
 
     cv2.circle(thermal_picture_colored, (16, 16), 8, (0, 255, 255), 1)

@@ -3,7 +3,7 @@ import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from past.builtins import raw_input
+
 
 LEFT_GUIDE_X = 10
 RIGHT_GUIDE_X = 140
@@ -18,7 +18,17 @@ filenames = [filename for filename in filenames if filename.endswith('.png')]
 filenames.sort(key=lambda x: int(x[6:-4]))
 
 for filename in filenames:
-    thermal_images.append(cv2.imread(os.path.join(DIR_NAME, filename), cv2.IMREAD_ANYDEPTH))
+    #thermal_images.append(cv2.imread(os.path.join(DIR_NAME, filename), cv2.IMREAD_ANYDEPTH))
+
+    # with open(f'{dir_buffer}/frame_{i:04d}.raw', 'wb') as f:
+    #             f.write(usb_frame)
+
+    # read file to cv2 image
+    raw_frame = np.fromfile(os.path.join(DIR_NAME, filename[:-4] + '.raw'), dtype=np.uint16)
+    raw_frame = raw_frame.reshape((384, 256))
+    print(raw_frame.shape)
+
+
 
 # use plt with ion to display the image
 plt.ion()
